@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Recordings & generated files
+recordings/
+transcripts/
+recordings_index.json
+transcription_errors.log
+SERVED_VERSION.html
+
+# Whisper model cache
+faster_whisper_models/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MeetScribe — Meeting Recorder</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="container">
+    <!-- Header -->
+    <header>
+        <div class="logo">
+            <span class="logo-icon">🎙️</span>
+            <h1>MeetScribe</h1>
+        </div>
+        <div class="status-badge" id="statusBadge">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Idle</span>
+        </div>
+    </header>
+
+    <!-- Recording Controls -->
+    <section class="controls">
+        <div class="input-group">
+            <label for="meetingName">Meeting Name</label>
+            <input type="text" id="meetingName" placeholder="e.g., Team Standup - April 5" autocomplete="off">
+        </div>
+
+        <!-- Live Info Panel (shows during recording) -->
+        <div class="live-info" id="liveInfo" style="display: none;">
+            <div class="timer-col">
+                <div class="timer-label">ELAPSED</div>
+                <div class="timer-display" id="timerDisplay">00:00:00</div>
+                <div class="timer-sub" id="capturedLabel">0.0s captured</div>
+            </div>
+            <div class="live-transcript-panel">
+                <label>Live Status</label>
+                <div class="live-transcript-content" id="liveTranscript">
+                    <span class="listening">🎤 Listening...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Transcribing banner (shows while transcription runs in background) -->
+        <div class="transcribing-banner" id="transcribingBanner" style="display: none;">
+            <span class="spinner"></span>
+            Transcribing in background — you can start a new recording
+        </div>
+
+        <div class="buttons">
+            <button class="btn btn-start" id="btnStart">⏺ Start Recording</button>
+            <button class="btn btn-stop" id="btnStop" disabled>⏹ Stop Recording</button>
+        </div>
+    </section>
+
+    <!-- Recordings History -->
+    <section class="recordings">
+        <h2>Recordings History</h2>
+        <div id="recordingsGrid" class="recordings-grid">
+            <!-- Recordings will be loaded here -->
+        </div>
+        <p class="empty-state" id="emptyState" style="display: none;">No recordings yet. Start your first meeting!</p>
+    </section>
+</div>
+
+<!-- Modal for viewing transcripts/summaries -->
+<div class="modal-overlay" id="modalOverlay" style="display: none;">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="modalTitle">Title</h3>
+            <button class="modal-close" id="modalClose">✕</button>
+        </div>
+        <div class="modal-body">
+            <pre class="transcript-text" id="modalContent"></pre>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ---------------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------------
+    let isRecording = false;
+    let isTranscribing = false;
+    let currentMeetingName = '';
+    let pollHandle = null;          // Polls /api/status for transcription completion
+    let liveHandle = null;          // Polls /api/live_status during recording
+    let timerInterval = null;
+    let recordingStartTime = null;
+
+    // DOM refs (populated on DOMContentLoaded)
+    let btnStart, btnStop, meetingNameInput, statusDot, statusText,
+        liveInfo, timerDisplay, capturedLabel, liveTranscript,
+        transcribingBanner, recordingsGrid, emptyState,
+        modalOverlay, modalTitle, modalContent, modalClose;
+
+    // ---------------------------------------------------------------------------
+    // Status helpers
+    // ---------------------------------------------------------------------------
+    function setStatus(status) {
+        statusDot.className = 'status-dot status-' + status;
+        const labels = { idle: 'Idle', recording: 'Recording', transcribing: 'Transcribing' };
+        statusText.textContent = labels[status] || status;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Timer
+    // ---------------------------------------------------------------------------
+    function startTimer() {
+        recordingStartTime = Date.now();
+        timerInterval = setInterval(updateTimer, 1000);
+        updateTimer();
+    }
+
+    function updateTimer() {
+        if (!recordingStartTime) return;
+        const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+        const h = Math.floor(elapsed / 3600);
+        const m = Math.floor((elapsed % 3600) / 60);
+        const s = elapsed % 60;
+        timerDisplay.textContent =
+            String(h).padStart(2, '0') + ':' +
+            String(m).padStart(2, '0') + ':' +
+            String(s).padStart(2, '0');
+    }
+
+    function stopTimer() {
+        clearInterval(timerInterval);
+        timerInterval = null;
+        recordingStartTime = null;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Live status polling (during recording — updates captured duration)
+    // ---------------------------------------------------------------------------
+    function startLivePolling() {
+        liveHandle = setInterval(async () => {
+            try {
+                const res = await fetch('/api/live_status');
+                const d = await res.json();
+                if (d.is_recording) {
+                    liveTranscript.innerHTML =
+                        `<span class="listening">🎤 Recording... <strong>${d.duration}s</strong> of audio captured (${d.chunks} chunks)</span>`;
+                    capturedLabel.textContent = d.duration + 's captured';
+                }
+            } catch (e) { /* ignore */ }
+        }, 1000);
+    }
+
+    function stopLivePolling() {
+        clearInterval(liveHandle);
+        liveHandle = null;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Start recording
+    // ---------------------------------------------------------------------------
+    async function startRecording() {
+        const name = meetingNameInput.value.trim();
+        if (!name) {
+            alert('Please enter a meeting name first.');
+            meetingNameInput.focus();
+            return;
+        }
+
+        // Update UI immediately
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        meetingNameInput.disabled = true;
+        isRecording = true;
+        currentMeetingName = name;
+        setStatus('recording');
+
+        // Show live panel
+        liveInfo.style.display = 'flex';
+        capturedLabel.textContent = '0.0s captured';
+        liveTranscript.innerHTML = '<span class="listening">🎤 Listening...</span>';
+        startTimer();
+        startLivePolling();
+
+        try {
+            const res = await fetch('/api/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ meeting_name: name })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                alert('Failed to start: ' + data.error);
+                resetUI();
+            }
+        } catch (e) {
+            alert('Network error starting recording.');
+            resetUI();
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stop recording
+    // ---------------------------------------------------------------------------
+    async function stopRecording() {
+        btnStop.disabled = true;
+        stopTimer();
+        stopLivePolling();
+
+        try {
+            const res = await fetch('/api/stop', { method: 'POST' });
+            const data = await res.json();
+
+            if (data.success) {
+                // Immediately re-enable the UI so the user can start a new recording
+                isRecording = false;
+                liveInfo.style.display = 'none';
+                liveTranscript.innerHTML = '';
+                btnStart.disabled = false;
+                meetingNameInput.disabled = false;
+                meetingNameInput.value = '';
+
+                // Show background transcription banner
+                isTranscribing = true;
+                setStatus('transcribing');
+                transcribingBanner.style.display = 'flex';
+
+                // Reload recordings list now (shows "Processing" status)
+                loadRecordings();
+
+                // Poll in background until transcription finishes
+                startPolling();
+            } else {
+                alert('Failed to stop: ' + data.error);
+                resetUI();
+            }
+        } catch (e) {
+            alert('Network error stopping recording.');
+            resetUI();
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Poll /api/status until transcription done — does NOT block new recordings
+    // ---------------------------------------------------------------------------
+    function startPolling() {
+        if (pollHandle) clearInterval(pollHandle);
+        pollHandle = setInterval(async () => {
+            try {
+                const res = await fetch('/api/status');
+                const d = await res.json();
+
+                if (d.status === 'idle') {
+                    clearInterval(pollHandle);
+                    pollHandle = null;
+                    isTranscribing = false;
+                    transcribingBanner.style.display = 'none';
+                    // Only update header status if we're not currently in a new recording
+                    if (!isRecording) setStatus('idle');
+                    loadRecordings();
+                } else if (d.status === 'transcribing' && !isRecording) {
+                    setStatus('transcribing');
+                }
+            } catch (e) { /* ignore */ }
+        }, 2000);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Full UI reset
+    // ---------------------------------------------------------------------------
+    function resetUI() {
+        isRecording = false;
+        isTranscribing = false;
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        meetingNameInput.disabled = false;
+        meetingNameInput.value = '';
+        liveInfo.style.display = 'none';
+        transcribingBanner.style.display = 'none';
+        stopTimer();
+        stopLivePolling();
+        liveTranscript.innerHTML = '';
+        capturedLabel.textContent = '0.0s captured';
+        setStatus('idle');
+    }
+
+    // ---------------------------------------------------------------------------
+    // Load and render recordings grid
+    // ---------------------------------------------------------------------------
+    async function loadRecordings() {
+        try {
+            const res = await fetch('/api/recordings');
+            const recordings = await res.json();
+            renderRecordings(recordings);
+        } catch (e) { /* ignore */ }
+    }
+
+    function renderRecordings(recordings) {
+        if (!recordings || recordings.length === 0) {
+            recordingsGrid.innerHTML = '';
+            emptyState.style.display = 'block';
+            return;
+        }
+
+        emptyState.style.display = 'none';
+
+        recordingsGrid.innerHTML = `
+            <table class="recordings-table">
+                <thead>
+                    <tr>
+                        <th class="col-no">#</th>
+                        <th>Title</th>
+                        <th>Date</th>
+                        <th>Duration</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${recordings.map((rec, idx) => `
+                        <tr id="row-${rec.id}">
+                            <td class="rec-no">${idx + 1}</td>
+                            <td class="rec-title">${escHtml(rec.name)}</td>
+                            <td class="rec-date">${escHtml(rec.date)}</td>
+                            <td class="rec-duration">${formatDuration(rec.duration)}</td>
+                            <td><span class="status-badge-small status-${escHtml(rec.status)}">${statusLabel(rec.status)}</span></td>
+                            <td class="rec-actions">
+                                ${rec.transcript_file || rec.transcript_path ? `
+                                    <button class="btn btn-small btn-view" data-id="${rec.id}" data-type="transcript" title="View transcript">Transcript</button>
+                                    <button class="btn btn-small btn-summary" data-id="${rec.id}" data-type="summary" title="View summary">Summary</button>
+                                ` : `<span class="rec-pending">${rec.status === 'error' ? '❌ Error' : '⏳ Processing...'}</span>`}
+                                <button class="btn btn-small btn-delete" data-id="${rec.id}" title="Delete recording">Delete</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        `;
+
+        // Attach event handlers
+        recordingsGrid.querySelectorAll('.btn-view, .btn-summary').forEach(btn => {
+            btn.addEventListener('click', () => viewContent(btn.dataset.id, btn.dataset.type));
+        });
+        recordingsGrid.querySelectorAll('.btn-delete').forEach(btn => {
+            btn.addEventListener('click', () => deleteRecording(btn.dataset.id));
+        });
+    }
+
+    function formatDuration(seconds) {
+        if (!seconds) return '-';
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    function statusLabel(status) {
+        const map = {
+            recorded:    '⏳ Processing',
+            transcribed: '✅ Ready',
+            error:       '❌ Error'
+        };
+        return map[status] || status;
+    }
+
+    function escHtml(str) {
+        if (!str) return '';
+        const d = document.createElement('div');
+        d.textContent = str;
+        return d.innerHTML;
+    }
+
+    // ---------------------------------------------------------------------------
+    // View transcript or summary in modal
+    // ---------------------------------------------------------------------------
+    async function viewContent(id, type) {
+        const endpoint = type === 'summary' ? `/api/summary/${id}` : `/api/transcript/${id}`;
+        try {
+            const res = await fetch(endpoint);
+            const data = await res.json();
+            if (!data.success) {
+                alert(type === 'summary' ? 'Summary not ready yet.' : 'Transcript not ready yet.');
+                return;
+            }
+            const label = type === 'summary' ? 'Summary' : 'Transcript';
+            // Find the recording name for the modal title
+            const row = document.getElementById('row-' + id);
+            const title = row ? row.querySelector('.rec-title')?.textContent : '';
+            showModal(title ? `${label} — ${title}` : label, data.content || '');
+        } catch (e) {
+            alert('Could not load content.');
+        }
+    }
+
+    function showModal(title, content) {
+        modalTitle.textContent = title;
+        modalContent.textContent = content;
+        modalOverlay.style.display = 'flex';
+    }
+
+    function hideModal() {
+        modalOverlay.style.display = 'none';
+    }
+
+    // ---------------------------------------------------------------------------
+    // Delete recording
+    // ---------------------------------------------------------------------------
+    async function deleteRecording(id) {
+        if (!confirm('Delete this recording and all its files?')) return;
+        try {
+            const res = await fetch('/api/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            });
+            const data = await res.json();
+            if (data.success) {
+                loadRecordings();
+            } else {
+                alert('Delete failed: ' + data.error);
+            }
+        } catch (e) {
+            alert('Network error deleting recording.');
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Boot
+    // ---------------------------------------------------------------------------
+    document.addEventListener('DOMContentLoaded', () => {
+        btnStart           = document.getElementById('btnStart');
+        btnStop            = document.getElementById('btnStop');
+        meetingNameInput   = document.getElementById('meetingName');
+        statusDot          = document.getElementById('statusDot');
+        statusText         = document.getElementById('statusText');
+        liveInfo           = document.getElementById('liveInfo');
+        timerDisplay       = document.getElementById('timerDisplay');
+        capturedLabel      = document.getElementById('capturedLabel');
+        liveTranscript     = document.getElementById('liveTranscript');
+        transcribingBanner = document.getElementById('transcribingBanner');
+        recordingsGrid     = document.getElementById('recordingsGrid');
+        emptyState         = document.getElementById('emptyState');
+        modalOverlay       = document.getElementById('modalOverlay');
+        modalTitle         = document.getElementById('modalTitle');
+        modalContent       = document.getElementById('modalContent');
+        modalClose         = document.getElementById('modalClose');
+
+        btnStart.addEventListener('click', startRecording);
+        btnStop.addEventListener('click', stopRecording);
+        modalClose.addEventListener('click', hideModal);
+        modalOverlay.addEventListener('click', e => {
+            if (e.target === modalOverlay) hideModal();
+        });
+        // Also close modal on Escape key
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') hideModal();
+        });
+
+        // Check if transcription was in progress when page loaded
+        fetch('/api/status').then(r => r.json()).then(d => {
+            setStatus(d.status);
+            if (d.status === 'transcribing') {
+                isTranscribing = true;
+                transcribingBanner.style.display = 'flex';
+                startPolling();
+            }
+        }).catch(() => setStatus('idle'));
+
+        loadRecordings();
+    });
+</script>
+
+</body>
+</html>
