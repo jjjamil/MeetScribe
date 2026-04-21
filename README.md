@@ -2,82 +2,102 @@
 
 **Local meeting recorder with Whisper transcription — no cloud, no subscriptions.**
 
-Records audio from your computer (meeting apps like Zoom, Google Meet, Teams, Facebook Call all route through a virtual audio cable), transcribes it locally using Whisper, and exports timestamped .txt transcripts.
+Records audio from your computer (meeting apps like Zoom, Google Meet, Teams, Facebook Messenger all route through a virtual audio cable), transcribes it locally using Whisper, and exports timestamped .txt transcripts.
 
 ---
 
 ## Requirements
 
-- **Windows 10/11**
+- **macOS 12+** (also works on Windows 10/11)
 - **Python 3.10 or 3.11**
-- **VB-Audio Virtual Cable** (free) — routes meeting audio to MeetScribe
+- **BlackHole** (free virtual audio cable for macOS) — routes meeting audio to MeetScribe
 - **8GB+ RAM** recommended (16GB for smooth Whisper CPU transcription)
 
 ---
 
 ## Setup
 
-### Step 1 — Install a Virtual Audio Cable
+### Step 1 — Install BlackHole (Virtual Audio Cable)
 
-VB-CABLE requires a donation to download. Two free alternatives:
+BlackHole routes audio from your meeting app into MeetScribe.
 
-**Option A — Voicemeeter Banana (Recommended, Free)**
-1. Download from: https://www.vb-audio.com/Voicemeeter Banana
-2. Install and run Voicemeeter Banana
-3. In your meeting app, set output to **VB-Audio VoiceMeeter VAIO**
-4. In MeetScribe, select **VoiceMeeter Input** as the recording device
+1. Download **BlackHole 2ch** from: https://existential.audio/blackhole/
+2. Run the installer and restart your Mac
+3. Verify it appears in **System Settings → Sound** as an input/output option
 
-**Option B — OBS Studio (Completely Free)**
-1. Download: https://obsproject.com
-2. Use OBS Virtual Camera as a virtual output
-3. Route meeting audio through OBS
+### Step 2 — Set Up Audio MIDI (Two Devices Required)
 
-**Option C — VB-CABLE (Donationware)**
-1. Go to https://www.vb-audio.com/Cable/VirtualCables.htm
-2. Click Donate to get your personal download link
-3. Run the installer, restart computer
-4. Set meeting app output to **CABLE Input**
+You need **two virtual devices** — one for output (hear + capture meeting audio) and one for input (capture your mic + meeting audio together).
 
-### Step 2 — Route Meeting Audio to the Virtual Cable
+Open **Audio MIDI Setup** (search in Spotlight).
 
-**Zoom:**
-- Settings → Audio → Speaker → Select **CABLE Input (VB-Audio Virtual Cable)**
+#### Part A — Multi-Output Device (so you hear the meeting AND BlackHole captures it)
 
-**Google Meet:**
-- Uses your system default output. Set system default:
-  - Right-click speaker icon → Open Sound Settings
-  - Output device → **CABLE Input (VB-Audio Virtual Cable)**
+1. Click **+** → **Create Multi-Output Device**
+2. Check devices in this order:
 
-**Microsoft Teams:**
-- Settings → Devices → Speaker → **CABLE Input (VB-Audio Virtual Cable)**
+   | Device | Drift Correction |
+   |--------|-----------------|
+   | AirPods | ❌ (clock master) |
+   | BlackHole 2ch | ✅ |
 
-**Facebook Call:**
-- Uses system default output (set as above)
+3. Set **Clock Source → AirPods**
+4. Right-click → **Use This Device For Sound Output**
+5. Rename it **"MeetScribe Output"**
+
+#### Part B — Aggregate Device (captures your mic + meeting audio in one stream)
+
+1. Click **+** → **Create Aggregate Device**
+2. Check devices in this order:
+
+   | Device | Use |
+   |--------|-----|
+   | BlackHole 2ch | ✅ (meeting audio coming in) |
+   | AirPods / Built-in Microphone | ✅ (your voice) |
+
+3. Rename it **"MeetScribe Input"**
+4. In MeetScribe UI, select **"MeetScribe Input"** as the audio device
+
+#### Set your meeting app output
+
+In your meeting app, set the speaker/output to **"MeetScribe Output"**:
+
+   | App | Where to change |
+   |-----|----------------|
+   | Zoom | Settings → Audio → Speaker |
+   | Google Meet | Uses system default output |
+   | Microsoft Teams | Settings → Devices → Speaker |
+   | Slack / FaceTime | Uses system default output |
 
 ### Step 3 — Install Python Dependencies
 
 ```bash
-cd C:\Users\Joseph\CodingAgent\MeetScribe
+cd "/Users/jamiljoseph/Documents/Code/Web Development/MeetScribe"
 pip install -r requirements.txt
 ```
 
 ### Step 4 — Run MeetScribe
 
 ```bash
-python app.py
+python3 app.py
 ```
 
-Then open your browser to: **[http://localhost:5000](http://localhost:5000)**
+Then open your browser to: **http://localhost:5001**
+
+### Step 5 — Select BlackHole as the Input Device
+
+In the MeetScribe UI, the **Audio Input Device** dropdown will list all available input devices. Select **BlackHole 2ch** (it's auto-selected if detected).
 
 ---
 
 ## Usage
 
-1. **Enter a meeting name** (e.g., "Team Standup - April 5")
-2. **Click "Start Recording"** — the app captures audio from the virtual cable
-3. **Join your meeting** — audio is being captured in the background
-4. **Click "Stop Recording"** — recording stops, transcription begins automatically
-5. **View or download the transcript** — timestamps included
+1. **Select audio input device** — choose BlackHole 2ch from the dropdown
+2. **Enter a meeting name** (e.g., "Team Standup - April 5")
+3. **Click "Start Recording"** — MeetScribe captures audio from BlackHole
+4. **Join your meeting** — audio is being captured in the background
+5. **Click "Stop Recording"** — recording stops, transcription begins automatically
+6. **View or download the transcript** — timestamps included
 
 ---
 
@@ -104,6 +124,7 @@ MeetScribe/
 |---------|-----------|
 | On-demand recording (not automatic) | ✅ |
 | Timestamped .txt transcript export | ✅ |
+| Audio input device selector | ✅ |
 | Per-meeting folder organization | ✅ |
 | Delete recording + all files | ✅ |
 | Dark theme UI | ✅ |
@@ -115,14 +136,29 @@ MeetScribe/
 
 ## Troubleshooting
 
-**"No audio recorded"**
-→ Make sure your meeting app's audio output is set to VB-Cable, not your speakers. If you hear audio, it won't be captured.
+**"No audio recorded" / transcript is empty**
+→ Make sure your meeting app's audio output is set to the Multi-Output Device (not just your speakers). If you only hear audio through your speakers and not BlackHole, it won't be captured.
+
+**Can't hear the meeting while recording**
+→ You must use a Multi-Output Device (see Step 2). BlackHole alone mutes your speakers.
 
 **Transcription is slow**
-→ Use GPU transcription: change `device="cuda"` in `app.py`. Requires CUDA + NVIDIA GPU.
+→ Normal on CPU. For Apple Silicon Macs, try: `pip install faster-whisper` and change `compute_type="int8"` to `compute_type="float16"` in `app.py`.
 
 **Whisper model not found**
-→ First run: faster-whisper will download the model automatically (~140MB for base model).
+→ First run: faster-whisper will download the model automatically (~140MB for base model). Requires an internet connection on first launch.
+
+**BlackHole not showing in device list**
+→ Restart MeetScribe after installing BlackHole. If still missing, go to System Settings → Sound and confirm BlackHole appears there first.
+
+---
+
+## Windows Setup
+
+1. Install **VB-CABLE** from https://www.vb-audio.com/Cable/
+2. Set your meeting app output to **CABLE Input (VB-Audio Virtual Cable)**
+3. In MeetScribe, select **CABLE Output** as the audio input device
+4. Run: `pip install -r requirements.txt` then `python app.py`
 
 ---
 

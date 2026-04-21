@@ -17,8 +17,9 @@ import sounddevice as sd
 import soundfile as sf
 import numpy as np
 
-# Transcription
-from faster_whisper import WhisperModel
+# Transcription + audio preprocessing
+import mlx_whisper
+import librosa
 
 app = Flask(__name__)
 app.config['RECORDINGS_DIR'] = Path(__file__).parent / 'recordings'
@@ -41,33 +42,24 @@ class RecordingState:
         self.audio_queue = []
         self.stream = None
         self.sample_rate = 16000
+        self.channels = 1
         self.recording_thread = None
 
 state = RecordingState()
 
 # ---------------------------------------------------------------------------
-# Whisper model (lazy-load, CPU by default, GPU if available)
+# Audio device helpers
 # ---------------------------------------------------------------------------
-whisper_model = None
+def list_input_devices():
+    """Return a list of available audio input devices."""
+    devices = []
+    for i, dev in enumerate(sd.query_devices()):
+        if dev['max_input_channels'] > 0:
+            devices.append({"index": i, "name": dev['name']})
+    return devices
 
-def get_whisper_model():
-    global whisper_model
-    if whisper_model is None:
-        # Force CPU-only inference — faster-whisper tries to load CUDA/cuBLAS
-        # internally even when device="cpu" unless compute_type is explicitly set
-        print("[Whisper] Loading model on CPU (int8)...")
-        try:
-            whisper_model = WhisperModel(
-                "base",
-                device="cpu",
-                compute_type="int8",
-                cpu_threads=4,
-            )
-            print("[Whisper] CPU model loaded successfully")
-        except Exception as e:
-            print(f"[Whisper] Failed to load model: {e}")
-            raise
-    return whisper_model
+# mlx-whisper model repo (Apple Silicon optimized, large-v3)
+MLX_MODEL = "mlx-community/whisper-large-v3-mlx"
 
 # ---------------------------------------------------------------------------
 # Audio recording
@@ -79,7 +71,7 @@ def audio_callback(indata, frames, time, status):
     if state.is_recording:
         state.audio_queue.append(indata.copy())
 
-def start_recording_meeting(meeting_name: str):
+def start_recording_meeting(meeting_name: str, device=None):
     """Start recording audio to a per-meeting folder."""
     if state.is_recording:
         return False, "Already recording"
@@ -90,21 +82,35 @@ def start_recording_meeting(meeting_name: str):
     meeting_dir = app.config['RECORDINGS_DIR'] / f"{safe_name}_{meeting_id}"
     meeting_dir.mkdir(parents=True, exist_ok=True)
 
+    # Detect channel count — multi-channel for Aggregate Devices (mic + BlackHole)
+    if device is not None:
+        try:
+            dev_info = sd.query_devices(device)
+            n_channels = max(1, min(dev_info['max_input_channels'], 8))
+        except Exception:
+            n_channels = 1
+    else:
+        n_channels = 1
+
     state.is_recording = True
     state.current_meeting_name = meeting_name
     state.current_meeting_id = meeting_id
     state.current_meeting_dir = meeting_dir
     state.audio_queue = []
     state.sample_rate = 16000
+    state.channels = n_channels
 
     def record_loop():
         try:
-            with sd.InputStream(
+            stream_kwargs = dict(
                 samplerate=state.sample_rate,
-                channels=1,
+                channels=n_channels,
                 dtype='float32',
-                callback=audio_callback
-            ):
+                callback=audio_callback,
+            )
+            if device is not None:
+                stream_kwargs['device'] = device
+            with sd.InputStream(**stream_kwargs):
                 while state.is_recording:
                     sd.sleep(100)
         except Exception as e:
@@ -126,8 +132,10 @@ def stop_recording_meeting():
     if not state.audio_queue:
         return None
 
-    # Concatenate all audio chunks
+    # Concatenate all audio chunks and mix to mono
     audio_data = np.concatenate(state.audio_queue, axis=0)
+    if audio_data.ndim > 1 and audio_data.shape[1] > 1:
+        audio_data = audio_data.mean(axis=1)
     audio_path = state.current_meeting_dir / "recording.wav"
     sf.write(str(audio_path), audio_data, state.sample_rate)
 
@@ -147,37 +155,83 @@ def stop_recording_meeting():
 # ---------------------------------------------------------------------------
 # Transcription
 # ---------------------------------------------------------------------------  
+def _preprocess_audio(audio_path: str) -> str:
+    """Resample to 16kHz mono and normalize. Overwrites the file in place."""
+    print(f"[Preprocess] Loading {audio_path}...")
+    audio, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+
+    # Normalize to -1dB headroom
+    peak = np.max(np.abs(audio))
+    if peak > 0:
+        audio = audio * (0.891 / peak)  # 0.891 ≈ -1dBFS
+        print(f"[Preprocess] Normalized (peak {peak:.4f} -> {np.max(np.abs(audio)):.4f})")
+
+    sf.write(str(audio_path), audio, 16000)
+    print(f"[Preprocess] Saved preprocessed audio ({len(audio)/16000:.1f}s @ 16kHz mono)")
+    return str(audio_path)
+
+
+def _generate_summary_ollama(transcript: str, meeting_name: str) -> str | None:
+    """Call local Ollama to summarize the transcript. Returns None if unavailable."""
+    import urllib.request as _urlreq
+    import json as _json
+
+    prompt = (
+        f"You are a meeting assistant. Summarize the following meeting transcript for '{meeting_name}'.\n"
+        "Provide:\n"
+        "- A brief overview (2-3 sentences)\n"
+        "- Key topics discussed\n"
+        "- Action items (if any)\n"
+        "- Decisions made (if any)\n\n"
+        f"Transcript:\n{transcript[:8000]}\n\nSummary:"
+    )
+
+    payload = _json.dumps({
+        "model": "minimax-m2.7",
+        "prompt": prompt,
+        "stream": False
+    }).encode()
+
+    req = _urlreq.Request(
+        "http://localhost:11434/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=180) as resp:
+            data = _json.loads(resp.read())
+            return data.get("response", "").strip() or None
+    except Exception as e:
+        print(f"[Summary] Ollama unavailable: {e}")
+        return None
+
+
 def _do_transcribe(audio_path: str, meeting_id: str, meeting_name: str):
     """Core transcription logic — raises on error."""
-    # Normalize audio to boost quiet recordings
-    audio_data, sample_rate = sf.read(str(audio_path))
-    peak = max(abs(audio_data.max()), abs(audio_data.min()))
-    if peak > 0 and peak < 0.5:
-        # Normalize to -3dB headroom
-        target = 0.7
-        audio_data = audio_data * (target / peak)
-        audio_data = audio_data.astype(np.float32)
-        # Overwrite with normalized audio
-        sf.write(str(audio_path), audio_data, sample_rate)
-        print(f"[Transcribe] Normalized audio (peak {peak:.4f} -> {target:.4f})")
+    # Preprocess: resample to 16kHz mono + normalize
+    _preprocess_audio(audio_path)
 
-    model = get_whisper_model()
-    print(f"[Transcribe] Model ready, transcribing {audio_path}...")
-    segments, info = model.transcribe(
+    print(f"[Transcribe] Running mlx-whisper large-v3 on {audio_path}...")
+    result = mlx_whisper.transcribe(
         str(audio_path),
-        beam_size=2,        # 2 works better than 3/5 for this audio
-        language="en",      # hint language to avoid detection issues
-        vad_filter=False,   # VAD was returning 0 segments — disabled
-        task="transcribe",
+        path_or_hf_repo=MLX_MODEL,
+        verbose=False,
     )
-    print(f"[Transcribe] Detected language: {info.language} (prob: {info.language_probability:.2f})")
+
+    detected_language = result.get("language", "unknown")
+    print(f"[Transcribe] Detected language: {detected_language}")
 
     transcript_lines = []
-    for segment in segments:
-        start_hms = seconds_to_hms(segment.start)
-        speaker = "Speaker"
-        text = segment.text.strip()
-        transcript_lines.append(f"[{start_hms}] {speaker}: {text}")
+    prev_text = None
+    for segment in result.get("segments", []):
+        text = segment["text"].strip()
+        # Skip blank segments and consecutive duplicate lines (Whisper hallucination)
+        if not text or text == prev_text:
+            continue
+        start_hms = seconds_to_hms(segment["start"])
+        transcript_lines.append(f"[{start_hms}] Speaker: {text}")
+        prev_text = text
 
     # Save transcript
     meeting_dir = Path(audio_path).parent
@@ -190,15 +244,24 @@ def _do_transcribe(audio_path: str, meeting_id: str, meeting_name: str):
     update_recording_index(meeting_id, transcript_path=str(transcript_path), status="transcribed")
     print(f"[Transcribe] Updated index for {meeting_id}")
 
-    # Save summary
+    # Generate summary via Ollama, fall back to a plain header if unavailable
+    duration = result["segments"][-1]["end"] if result.get("segments") else 0
     summary_path = meeting_dir / "summary.txt"
-    summary_path.write_text(
+
+    print(f"[Summary] Requesting Ollama summary for {meeting_id}...")
+    ollama_summary = _generate_summary_ollama(full_transcript, meeting_name)
+
+    header = (
         f"Meeting: {meeting_name}\n"
-        f"Duration: {info.duration:.1f}s\n"
-        f"Language: {info.language}\n\n"
-        f"{full_transcript}",
-        encoding="utf-8"
+        f"Duration: {duration:.1f}s\n"
+        f"Language: {detected_language}\n\n"
     )
+    if ollama_summary:
+        summary_content = header + f"=== AI Summary ===\n{ollama_summary}\n\n=== Full Transcript ===\n{full_transcript}"
+        print(f"[Summary] Ollama summary generated ({len(ollama_summary)} chars)")
+    else:
+        summary_content = header + f"[Summary unavailable — start Ollama with: ollama serve]\n\n=== Full Transcript ===\n{full_transcript}"
+    summary_path.write_text(summary_content, encoding="utf-8")
 
     print(f"[Transcribe] Transcription complete for {meeting_id}")
 
@@ -276,7 +339,14 @@ def api_start():
     if state.is_recording:
         return jsonify({"success": False, "error": "Already recording"}), 409
 
-    success, msg = start_recording_meeting(meeting_name)
+    device = data.get('device')  # optional: device index (int) from /api/devices
+    if device is not None:
+        try:
+            device = int(device)
+        except (ValueError, TypeError):
+            device = None
+
+    success, msg = start_recording_meeting(meeting_name, device=device)
     return jsonify({"success": success, "message": msg})
 
 @app.route('/api/stop', methods=['POST'])
@@ -371,6 +441,15 @@ def api_status():
     elif state.is_transcribing:
         status = "transcribing"
     return jsonify({"status": status})
+
+@app.route('/api/devices', methods=['GET'])
+def api_devices():
+    """Return available audio input devices (for device selector in UI)."""
+    try:
+        devices = list_input_devices()
+        return jsonify({"success": True, "devices": devices})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/live_status', methods=['GET'])
 def api_live_status():

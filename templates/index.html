@@ -29,6 +29,14 @@
             <input type="text" id="meetingName" placeholder="e.g., Team Standup - April 5" autocomplete="off">
         </div>
 
+        <div class="input-group">
+            <label for="audioDevice">Audio Input Device</label>
+            <select id="audioDevice">
+                <option value="">⏳ Loading devices...</option>
+            </select>
+            <p class="device-hint">On macOS: install <strong>BlackHole</strong> and set your meeting app's audio output to it, then select it here.</p>
+        </div>
+
         <!-- Live Info Panel (shows during recording) -->
         <div class="live-info" id="liveInfo" style="display: none;">
             <div class="timer-col">
@@ -92,7 +100,7 @@
     let recordingStartTime = null;
 
     // DOM refs (populated on DOMContentLoaded)
-    let btnStart, btnStop, meetingNameInput, statusDot, statusText,
+    let btnStart, btnStop, meetingNameInput, audioDeviceSelect, statusDot, statusText,
         liveInfo, timerDisplay, capturedLabel, liveTranscript,
         transcribingBanner, recordingsGrid, emptyState,
         modalOverlay, modalTitle, modalContent, modalClose;
@@ -156,6 +164,28 @@
     }
 
     // ---------------------------------------------------------------------------
+    // Load audio devices
+    // ---------------------------------------------------------------------------
+    async function loadDevices() {
+        try {
+            const res = await fetch('/api/devices');
+            const data = await res.json();
+            if (data.success && data.devices.length > 0) {
+                audioDeviceSelect.innerHTML = data.devices.map(d =>
+                    `<option value="${d.index}">${d.name}</option>`
+                ).join('');
+                // Auto-select BlackHole if present
+                const blackhole = data.devices.find(d => d.name.toLowerCase().includes('blackhole'));
+                if (blackhole) audioDeviceSelect.value = blackhole.index;
+            } else {
+                audioDeviceSelect.innerHTML = '<option value="">Default system input</option>';
+            }
+        } catch (e) {
+            audioDeviceSelect.innerHTML = '<option value="">Default system input</option>';
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Start recording
     // ---------------------------------------------------------------------------
     async function startRecording() {
@@ -166,10 +196,14 @@
             return;
         }
 
+        const deviceVal = audioDeviceSelect.value;
+        const device = deviceVal !== '' ? parseInt(deviceVal) : null;
+
         // Update UI immediately
         btnStart.disabled = true;
         btnStop.disabled = false;
         meetingNameInput.disabled = true;
+        audioDeviceSelect.disabled = true;
         isRecording = true;
         currentMeetingName = name;
         setStatus('recording');
@@ -185,7 +219,7 @@
             const res = await fetch('/api/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ meeting_name: name })
+                body: JSON.stringify({ meeting_name: name, device })
             });
             const data = await res.json();
             if (!data.success) {
@@ -218,6 +252,7 @@
                 btnStart.disabled = false;
                 meetingNameInput.disabled = false;
                 meetingNameInput.value = '';
+                audioDeviceSelect.disabled = false;
 
                 // Show background transcription banner
                 isTranscribing = true;
@@ -274,6 +309,7 @@
         btnStop.disabled = true;
         meetingNameInput.disabled = false;
         meetingNameInput.value = '';
+        audioDeviceSelect.disabled = false;
         liveInfo.style.display = 'none';
         transcribingBanner.style.display = 'none';
         stopTimer();
@@ -429,6 +465,7 @@
         btnStart           = document.getElementById('btnStart');
         btnStop            = document.getElementById('btnStop');
         meetingNameInput   = document.getElementById('meetingName');
+        audioDeviceSelect  = document.getElementById('audioDevice');
         statusDot          = document.getElementById('statusDot');
         statusText         = document.getElementById('statusText');
         liveInfo           = document.getElementById('liveInfo');
@@ -464,6 +501,7 @@
             }
         }).catch(() => setStatus('idle'));
 
+        loadDevices();
         loadRecordings();
     });
 </script>
