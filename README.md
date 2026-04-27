@@ -123,14 +123,15 @@ MeetScribe/
 | Feature | Supported |
 |---------|-----------|
 | On-demand recording (not automatic) | ✅ |
+| Dual stream capture (mic + system audio) | ✅ |
 | Timestamped .txt transcript export | ✅ |
-| Audio input device selector | ✅ |
+| AI meeting summary via Ollama (local) | ✅ |
+| Audio device selector (mic + loopback) | ✅ |
 | Per-meeting folder organization | ✅ |
 | Delete recording + all files | ✅ |
-| Dark theme UI | ✅ |
-| Offline transcription (Whisper) | ✅ |
+| Light theme React UI | ✅ |
+| Offline transcription (faster-whisper) | ✅ |
 | Speaker diarization | ❌ (future) |
-| Summary generation | ❌ (future) |
 
 ---
 
@@ -155,10 +156,134 @@ MeetScribe/
 
 ## Windows Setup
 
-1. Install **VB-CABLE** from https://www.vb-audio.com/Cable/
-2. Set your meeting app output to **CABLE Input (VB-Audio Virtual Cable)**
-3. In MeetScribe, select **CABLE Output** as the audio input device
-4. Run: `pip install -r requirements.txt` then `python app.py`
+The Windows edition has been fully rewritten and tested on Windows 10/11. No virtual audio cable required.
+
+### What's different on Windows
+
+| Component | macOS | Windows |
+|-----------|-------|---------|
+| System audio capture | BlackHole + Aggregate Device | WASAPI Stereo Mix (built-in) |
+| Transcription engine | mlx-whisper (Apple Silicon) | faster-whisper (CPU, int8) |
+| AI summary | — | Ollama (local LLM) |
+| Frontend | Plain HTML | React + Vite |
+
+### Requirements
+
+- **Windows 10 or 11**
+- **Python 3.10–3.12**
+- **Node.js 18+** (for the React frontend build)
+- **Ollama** installed and running (for AI meeting summaries)
+- A mic and an audio output device (speakers, headset, etc.)
+
+### Step 1 — Enable Stereo Mix
+
+Stereo Mix is a Windows built-in feature that captures all system audio output (meeting audio, browser sounds, etc.) as a virtual input device. No extra software needed.
+
+1. Right-click the speaker icon in your taskbar → **Sound settings**
+2. Go to **Sound Control Panel** → **Recording** tab
+3. Right-click in the empty area → check **Show Disabled Devices**
+4. If **Stereo Mix** appears, right-click it → **Enable**
+5. If Stereo Mix is missing, check your sound card drivers (Realtek HD Audio includes it by default)
+
+### Step 2 — Install Python dependencies
+
+```bash
+cd meetscribe
+pip install -r requirements.txt
+```
+
+`requirements.txt` includes: `flask`, `sounddevice`, `soundfile`, `numpy`, `librosa`, `faster-whisper`
+
+### Step 3 — Build the frontend
+
+Only needed once (or after UI changes):
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+### Step 4 — Run MeetScribe
+
+```bash
+python app.py
+```
+
+Open your browser to: **http://localhost:5001**
+
+### Step 5 — Select your devices in the UI
+
+In the MeetScribe UI:
+
+- **Mic Input** — select your microphone (or leave as default; "Microsoft Sound Mapper" uses your Windows default input)
+- **Loopback / System Audio** — select **Stereo Mix** from the dropdown (captures meeting audio)
+
+Both streams are recorded simultaneously and mixed before transcription.
+
+### Step 6 — Install Ollama for AI summaries (optional but recommended)
+
+1. Download Ollama from **https://ollama.com**
+2. Pull the model:
+   ```bash
+   ollama pull minimax-m2.7:cloud
+   ```
+3. Ollama runs in the background automatically; MeetScribe will detect it and generate a summary after each recording
+
+If Ollama is not running, the transcript is still saved — only the AI summary is skipped.
+
+### How audio capture works on Windows
+
+MeetScribe opens **two parallel audio streams**:
+
+1. **Mic stream** — captures your voice from the selected microphone
+2. **Loopback stream** — captures system audio (meeting participants) via Stereo Mix
+
+Both streams are mixed (50/50) in Python using numpy, then saved as a single WAV file before transcription.
+
+You do **not** need to change any settings in your meeting app (Zoom, Teams, Meet, etc.) — just use your normal speaker/headset output and let Stereo Mix capture it.
+
+### Bluetooth headsets (AirPods, etc.)
+
+- **For mic input:** Go to Windows **Settings → System → Sound → Input** and set your headset as the default input device. Then in MeetScribe leave Mic as "Microsoft Sound Mapper" — it will use your headset automatically.
+- **For system audio capture:** Keep using Stereo Mix as the loopback device regardless of what headset you use.
+
+### Troubleshooting (Windows)
+
+**Stereo Mix not in device list**
+→ Enable it in Control Panel → Sound → Recording (right-click → Show Disabled Devices). If missing entirely, update your audio driver from your PC/motherboard manufacturer's site.
+
+**Transcription is slow**
+→ Normal on CPU. The `base` Whisper model (~140MB) gives a good speed/accuracy balance. First run downloads the model automatically.
+
+**Ollama summary not generating**
+→ Make sure Ollama is running (`ollama serve` in a terminal, or it auto-starts after install). Check with: `curl http://localhost:11434/api/tags`
+
+**"No audio recorded" after stopping**
+→ Make sure you selected both a mic device and the Stereo Mix loopback in the UI before clicking Start.
+
+---
+
+## Project Structure (Windows edition)
+
+```
+meetscribe/
+├── app.py                  # Flask backend — recording, transcription, Ollama summary
+├── requirements.txt        # Python dependencies
+├── recordings_index.json   # Per-meeting metadata
+├── recordings/             # Raw .wav files (one folder per meeting)
+├── frontend/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   └── components/
+│   │       ├── Topbar.jsx
+│   │       ├── Recorder.jsx
+│   │       ├── RecordingsList.jsx
+│   │       └── TranscriptModal.jsx
+│   ├── dist/               # Built React app (served by Flask)
+│   └── vite.config.js
+└── transcription_errors.log
+```
 
 ---
 

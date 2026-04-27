@@ -18,6 +18,14 @@ venv/
 .venv/
 env/
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Logs
+app.log
+*.log
+
 # OS
 .DS_Store
 Thumbs.db
