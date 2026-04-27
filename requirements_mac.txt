@@ -1,0 +1,6 @@
+mlx-whisper>=0.4.1
+flask>=3.0.0
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.26.0
+librosa>=0.10.0
