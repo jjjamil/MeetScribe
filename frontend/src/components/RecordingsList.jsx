@@ -104,9 +104,6 @@ export default function RecordingsList({ recordings, onView, onDelete }) {
                           <button onClick={() => onView(rec.id, 'transcript')} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             <FileText size={11} /> Transcript
                           </button>
-                          <button onClick={() => handleDownload(rec.id, rec.name)} title="Download transcript as .txt" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
-                            <Download size={11} /> Download
-                          </button>
                           <button onClick={() => onView(rec.id, 'summary')} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#eef2ff', color: '#4f46e5', border: '1px solid #c7d2fe', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             <Sparkles size={11} /> Summary
                           </button>
@@ -115,6 +112,14 @@ export default function RecordingsList({ recordings, onView, onDelete }) {
                         <span style={{ fontSize: '12px', color: '#9ca3af', fontStyle: 'italic' }}>
                           {rec.status === 'error' ? '❌ Error' : '⏳ Processing…'}
                         </span>
+                      )}
+                      {(rec.transcript_file || rec.transcript_path) && (
+                        <button onClick={() => handleDownload(rec.id, rec.name)} title="Download transcript" style={{ display: 'inline-flex', padding: '5px', background: 'transparent', border: 'none', borderRadius: '6px', cursor: 'pointer', color: '#d1d5db' }}
+                          onMouseEnter={e => { e.currentTarget.style.background = '#f0fdf4'; e.currentTarget.style.color = '#16a34a' }}
+                          onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#d1d5db' }}
+                        >
+                          <Download size={14} />
+                        </button>
                       )}
                       <button onClick={() => handleDelete(rec.id)} title="Delete" style={{ display: 'inline-flex', padding: '5px', background: 'transparent', border: 'none', borderRadius: '6px', cursor: 'pointer', color: '#d1d5db' }}
                         onMouseEnter={e => { e.currentTarget.style.background = '#fef2f2'; e.currentTarget.style.color = '#ef4444' }}
