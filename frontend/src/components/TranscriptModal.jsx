@@ -1,8 +1,18 @@
 import { useEffect, useState } from 'react'
-import { X, Copy, Check } from 'lucide-react'
+import { X, Copy, Check, Download } from 'lucide-react'
 
 export default function TranscriptModal({ title, content, onClose }) {
   const [copied, setCopied] = useState(false)
+
+  const handleDownload = () => {
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${title.replace(/[^a-z0-9]/gi, '_')}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   useEffect(() => {
     const handler = (e) => e.key === 'Escape' && onClose()
@@ -27,6 +37,12 @@ export default function TranscriptModal({ title, content, onClose }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid #f3f4f6' }}>
           <h3 style={{ fontSize: '14px', fontWeight: 600, color: '#111827', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: '16px' }}>{title}</h3>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+            <button
+              onClick={handleDownload}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '6px 12px', background: '#f0fdf4', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 600, color: '#16a34a', cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}
+            >
+              <Download size={11} /> Download
+            </button>
             <button
               onClick={handleCopy}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '6px 12px', background: '#f3f4f6', border: 'none', borderRadius: '8px', fontSize: '12px', fontWeight: 600, color: '#374151', cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}

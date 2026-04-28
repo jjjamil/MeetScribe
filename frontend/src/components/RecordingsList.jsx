@@ -1,4 +1,4 @@
-import { Trash2, FileText, Sparkles, Clock, Calendar } from 'lucide-react'
+import { Trash2, FileText, Sparkles, Clock, Calendar, Download } from 'lucide-react'
 
 function StatusBadge({ status }) {
   const map = {
@@ -25,6 +25,19 @@ function formatDuration(seconds) {
 export default function RecordingsList({ recordings, onView, onDelete }) {
   const handleDelete = (id) => {
     if (confirm('Delete this recording and all its files?')) onDelete(id)
+  }
+
+  const handleDownload = async (id, name) => {
+    const res = await fetch(`/api/transcript/${id}`)
+    const data = await res.json()
+    if (!data.success) return alert('Transcript not ready yet.')
+    const blob = new Blob([data.content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name.replace(/[^a-z0-9]/gi, '_')}_transcript.txt`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   return (
@@ -90,6 +103,9 @@ export default function RecordingsList({ recordings, onView, onDelete }) {
                         <>
                           <button onClick={() => onView(rec.id, 'transcript')} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             <FileText size={11} /> Transcript
+                          </button>
+                          <button onClick={() => handleDownload(rec.id, rec.name)} title="Download transcript as .txt" style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
+                            <Download size={11} /> Download
                           </button>
                           <button onClick={() => onView(rec.id, 'summary')} style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', padding: '5px 10px', background: '#eef2ff', color: '#4f46e5', border: '1px solid #c7d2fe', borderRadius: '7px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', fontFamily: 'Inter, system-ui, sans-serif' }}>
                             <Sparkles size={11} /> Summary
