@@ -27,6 +27,7 @@ import soundfile as sf
 import numpy as np
 
 import librosa
+import soundcard as sc
 
 FRONTEND_DIST = Path(__file__).parent / 'frontend' / 'dist'
 
@@ -126,8 +127,8 @@ def _loopback_callback(indata, frames, time, status):
 # ---------------------------------------------------------------------------
 # Recording
 # ---------------------------------------------------------------------------
-def start_recording_meeting(meeting_name: str, mic_device=None, loopback_device=None):
-    """Start recording from mic and/or loopback device in parallel threads."""
+def start_recording_meeting(meeting_name: str, mic_device=None):
+    """Start recording from mic + auto-detected WASAPI loopback (works with any output incl. Bluetooth)."""
     if state.is_recording:
         return False, "Already recording"
 
@@ -145,9 +146,10 @@ def start_recording_meeting(meeting_name: str, mic_device=None, loopback_device=
     state.sample_rate = 16000
 
     def record_loop():
-        streams = []
+        sd_streams = []
+        loopback_thread = None
         try:
-            # Mic stream
+            # Mic stream (sounddevice)
             if mic_device is not None:
                 try:
                     dev_info = sd.query_devices(mic_device)
@@ -160,32 +162,13 @@ def start_recording_meeting(meeting_name: str, mic_device=None, loopback_device=
                         callback=_mic_callback,
                     )
                     mic_stream.start()
-                    streams.append(mic_stream)
+                    sd_streams.append(mic_stream)
                     print(f"[Record] Mic stream started: device={mic_device}")
                 except Exception as e:
                     print(f"[Record] Mic stream failed: {e}")
 
-            # Loopback stream (system audio)
-            if loopback_device is not None:
-                try:
-                    dev_info = sd.query_devices(loopback_device)
-                    ch = max(1, min(dev_info['max_input_channels'], 2))
-                    lb_stream = sd.InputStream(
-                        device=loopback_device,
-                        samplerate=state.sample_rate,
-                        channels=ch,
-                        dtype='float32',
-                        callback=_loopback_callback,
-                    )
-                    lb_stream.start()
-                    streams.append(lb_stream)
-                    print(f"[Record] Loopback stream started: device={loopback_device}")
-                except Exception as e:
-                    print(f"[Record] Loopback stream failed: {e}")
-
-            # If no streams opened, fall back to default input
-            if not streams:
-                print("[Record] No valid devices — using default input as mic")
+            if not sd_streams:
+                print("[Record] No valid mic device — using default input")
                 fallback = sd.InputStream(
                     samplerate=state.sample_rate,
                     channels=1,
@@ -193,7 +176,26 @@ def start_recording_meeting(meeting_name: str, mic_device=None, loopback_device=
                     callback=_mic_callback,
                 )
                 fallback.start()
-                streams.append(fallback)
+                sd_streams.append(fallback)
+
+            # Loopback thread via soundcard — opens the active output device directly in loopback
+            # mode, which works for any device including Bluetooth/AirPods.
+            def loopback_worker():
+                try:
+                    spk = sc.default_speaker()
+                    lb_mic = sc.get_microphone(spk.id, include_loopback=True)
+                    print(f"[Record] Loopback started: {lb_mic.name}")
+                    chunk_size = int(state.sample_rate * 0.1)
+                    with lb_mic.recorder(samplerate=state.sample_rate, channels=1, blocksize=chunk_size) as rec:
+                        while state.is_recording:
+                            data = rec.record(numframes=chunk_size)
+                            if state.is_recording:
+                                state.loopback_queue.append(data.copy().astype(np.float32))
+                except Exception as e:
+                    print(f"[Record] Loopback failed: {e}")
+
+            loopback_thread = threading.Thread(target=loopback_worker, daemon=True)
+            loopback_thread.start()
 
             while state.is_recording:
                 sd.sleep(100)
@@ -201,12 +203,14 @@ def start_recording_meeting(meeting_name: str, mic_device=None, loopback_device=
         except Exception as e:
             print(f"[Record] Unexpected error: {e}")
         finally:
-            for s in streams:
+            for s in sd_streams:
                 try:
                     s.stop()
                     s.close()
                 except Exception:
                     pass
+            if loopback_thread:
+                loopback_thread.join(timeout=2)
 
     state.recording_thread = threading.Thread(target=record_loop, daemon=True)
     state.recording_thread.start()
@@ -291,23 +295,46 @@ def _preprocess_audio(audio_path: str) -> str:
     return str(audio_path)
 
 
+def _build_summary_prompt(transcript: str, meeting_name: str) -> str:
+    return (
+        f"You are a meeting assistant. Carefully read the full transcript below and write a detailed summary for the meeting '{meeting_name}'.\n\n"
+        "Your summary must include:\n"
+        "## Overview\n"
+        "2-3 sentences covering the overall purpose and outcome of the meeting.\n\n"
+        "## Key Topics Discussed\n"
+        "For each major topic, write 2-4 sentences explaining what was discussed, any context given, and any conclusions reached. Be specific — include names, systems, numbers, and details mentioned.\n\n"
+        "## Action Items\n"
+        "List each action item with who is responsible (if mentioned) and any deadlines stated.\n\n"
+        "## Decisions Made\n"
+        "List each decision clearly, including the reasoning behind it if explained in the meeting.\n\n"
+        "Be thorough. Do not skip topics. If something was discussed at length, reflect that in your summary.\n\n"
+        f"Transcript:\n{transcript[:100000]}\n\nSummary:"
+    )
+
+
+def _generate_summary_claude(transcript: str, meeting_name: str):
+    """Call Claude Code CLI to summarize. Returns None if unavailable."""
+    import subprocess as _sp
+    prompt = _build_summary_prompt(transcript, meeting_name)
+    try:
+        result = _sp.run(
+            ["claude", "-p"],
+            input=prompt, capture_output=True, text=True, timeout=120
+        )
+        return result.stdout.strip() or None
+    except Exception as e:
+        print(f"[Summary] Claude CLI unavailable: {e}")
+        return None
+
+
 def _generate_summary_ollama(transcript: str, meeting_name: str):
-    """Call local Ollama to summarize the transcript. Returns None if unavailable."""
+    """Fallback: call local Ollama to summarize. Returns None if unavailable."""
     import urllib.request as _urlreq
     import json as _json
 
-    prompt = (
-        f"You are a meeting assistant. Summarize the following meeting transcript for '{meeting_name}'.\n"
-        "Provide:\n"
-        "- A brief overview (2-3 sentences)\n"
-        "- Key topics discussed\n"
-        "- Action items (if any)\n"
-        "- Decisions made (if any)\n\n"
-        f"Transcript:\n{transcript[:8000]}\n\nSummary:"
-    )
-
+    prompt = _build_summary_prompt(transcript, meeting_name)
     payload = _json.dumps({
-        "model": "minimax-m2.7:cloud",
+        "model": "llama3.1:8b",
         "prompt": prompt,
         "stream": False
     }).encode()
@@ -363,18 +390,24 @@ def _do_transcribe(audio_path: str, meeting_id: str, meeting_name: str):
     print(f"[Transcribe] Updated index for {meeting_id}")
 
     summary_path = meeting_dir / "summary.txt"
-    print(f"[Summary] Requesting Ollama summary for {meeting_id}...")
-    ollama_summary = _generate_summary_ollama(full_transcript, meeting_name)
+    print(f"[Summary] Requesting Claude summary for {meeting_id}...")
+    ai_summary = _generate_summary_claude(full_transcript, meeting_name)
+    if ai_summary:
+        print(f"[Summary] Claude summary generated ({len(ai_summary)} chars)")
+    else:
+        print(f"[Summary] Claude unavailable, falling back to Ollama...")
+        ai_summary = _generate_summary_ollama(full_transcript, meeting_name)
+        if ai_summary:
+            print(f"[Summary] Ollama summary generated ({len(ai_summary)} chars)")
 
     header = (
         f"Meeting: {meeting_name}\n"
         f"Language: {detected_language}\n\n"
     )
-    if ollama_summary:
-        summary_content = header + f"=== AI Summary ===\n{ollama_summary}\n\n=== Full Transcript ===\n{full_transcript}"
-        print(f"[Summary] Ollama summary generated ({len(ollama_summary)} chars)")
+    if ai_summary:
+        summary_content = header + f"=== AI Summary ===\n{ai_summary}"
     else:
-        summary_content = header + "[Summary unavailable — start Ollama with: ollama serve]\n\n=== Full Transcript ===\n{full_transcript}"
+        summary_content = header + "[Summary unavailable — start Ollama with: ollama serve]"
     summary_path.write_text(summary_content, encoding="utf-8")
 
     print(f"[Transcribe] Done for {meeting_id}")
@@ -464,10 +497,9 @@ def api_start():
         except (ValueError, TypeError):
             return None
 
-    mic_device      = parse_device(data.get('mic_device'))
-    loopback_device = parse_device(data.get('loopback_device'))
+    mic_device = parse_device(data.get('mic_device'))
 
-    success, msg = start_recording_meeting(meeting_name, mic_device=mic_device, loopback_device=loopback_device)
+    success, msg = start_recording_meeting(meeting_name, mic_device=mic_device)
     return jsonify({"success": success, "message": msg})
 
 @app.route('/api/stop', methods=['POST'])

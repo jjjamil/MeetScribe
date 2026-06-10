@@ -4,3 +4,4 @@ sounddevice>=0.4.6
 soundfile>=0.12.1
 numpy>=1.26.0
 librosa>=0.10.0
+soundcard>=0.4.0

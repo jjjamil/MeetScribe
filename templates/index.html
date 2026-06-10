@@ -30,11 +30,23 @@
         </div>
 
         <div class="input-group">
-            <label for="audioDevice">Audio Input Device</label>
-            <select id="audioDevice">
+            <label for="micDevice">🎤 Your Microphone</label>
+            <select id="micDevice">
                 <option value="">⏳ Loading devices...</option>
             </select>
-            <p class="device-hint">On macOS: install <strong>BlackHole</strong> and set your meeting app's audio output to it, then select it here.</p>
+            <p class="device-hint">Select your headset or built-in microphone — this captures your voice.</p>
+        </div>
+
+        <div class="input-group">
+            <label for="loopbackDevice">🔊 System Audio (Meeting Output)</label>
+            <select id="loopbackDevice">
+                <option value="">⏳ Loading devices...</option>
+            </select>
+            <p class="device-hint">
+                Select a <strong>Loopback</strong> or <strong>Stereo Mix</strong> device to capture meeting audio (Zoom, Teams, etc.).<br>
+                If nothing appears: open <strong>Sound Settings → Recording</strong>, right-click → <em>Show Disabled Devices</em>, then enable <strong>Stereo Mix</strong>.
+                Alternatively install <strong>VB-CABLE</strong> and set your meeting app output to <em>CABLE Input</em>, then select <em>CABLE Output</em> here.
+            </p>
         </div>
 
         <!-- Live Info Panel (shows during recording) -->
@@ -100,8 +112,8 @@
     let recordingStartTime = null;
 
     // DOM refs (populated on DOMContentLoaded)
-    let btnStart, btnStop, meetingNameInput, audioDeviceSelect, statusDot, statusText,
-        liveInfo, timerDisplay, capturedLabel, liveTranscript,
+    let btnStart, btnStop, meetingNameInput, micDeviceSelect, loopbackDeviceSelect,
+        statusDot, statusText, liveInfo, timerDisplay, capturedLabel, liveTranscript,
         transcribingBanner, recordingsGrid, emptyState,
         modalOverlay, modalTitle, modalContent, modalClose;
 
@@ -150,8 +162,11 @@
                 const res = await fetch('/api/live_status');
                 const d = await res.json();
                 if (d.is_recording) {
+                    const micPart      = d.mic_chunks      ? `🎤 mic: ${d.mic_chunks} chunks` : '';
+                    const loopbackPart = d.loopback_chunks ? `🔊 system: ${d.loopback_chunks} chunks` : '';
+                    const detail = [micPart, loopbackPart].filter(Boolean).join(' &nbsp;|&nbsp; ');
                     liveTranscript.innerHTML =
-                        `<span class="listening">🎤 Recording... <strong>${d.duration}s</strong> of audio captured (${d.chunks} chunks)</span>`;
+                        `<span class="listening">Recording... <strong>${d.duration}s</strong> &nbsp; ${detail}</span>`;
                     capturedLabel.textContent = d.duration + 's captured';
                 }
             } catch (e) { /* ignore */ }
@@ -170,18 +185,32 @@
         try {
             const res = await fetch('/api/devices');
             const data = await res.json();
-            if (data.success && data.devices.length > 0) {
-                audioDeviceSelect.innerHTML = data.devices.map(d =>
-                    `<option value="${d.index}">${d.name}</option>`
-                ).join('');
-                // Auto-select BlackHole if present
-                const blackhole = data.devices.find(d => d.name.toLowerCase().includes('blackhole'));
-                if (blackhole) audioDeviceSelect.value = blackhole.index;
-            } else {
-                audioDeviceSelect.innerHTML = '<option value="">Default system input</option>';
+            if (!data.success || !data.devices.length) {
+                micDeviceSelect.innerHTML = '<option value="">Default input</option>';
+                loopbackDeviceSelect.innerHTML = '<option value="">None</option>';
+                return;
+            }
+
+            const allDevices  = data.devices;
+            const loopbacks   = allDevices.filter(d => d.is_loopback);
+            const mics        = allDevices.filter(d => !d.is_loopback);
+
+            // Populate mic dropdown (non-loopback inputs)
+            micDeviceSelect.innerHTML =
+                mics.map(d => `<option value="${d.index}">${d.name}</option>`).join('');
+
+            // Populate loopback dropdown
+            loopbackDeviceSelect.innerHTML =
+                '<option value="">— None (mic only) —</option>' +
+                loopbacks.map(d => `<option value="${d.index}">${d.name}</option>`).join('');
+
+            // Auto-select first loopback if available
+            if (loopbacks.length) {
+                loopbackDeviceSelect.value = loopbacks[0].index;
             }
         } catch (e) {
-            audioDeviceSelect.innerHTML = '<option value="">Default system input</option>';
+            micDeviceSelect.innerHTML = '<option value="">Default input</option>';
+            loopbackDeviceSelect.innerHTML = '<option value="">None</option>';
         }
     }
 
@@ -196,14 +225,17 @@
             return;
         }
 
-        const deviceVal = audioDeviceSelect.value;
-        const device = deviceVal !== '' ? parseInt(deviceVal) : null;
+        const micVal      = micDeviceSelect.value;
+        const loopbackVal = loopbackDeviceSelect.value;
+        const micDevice      = micVal !== ''      ? parseInt(micVal)      : null;
+        const loopbackDevice = loopbackVal !== '' ? parseInt(loopbackVal) : null;
 
         // Update UI immediately
         btnStart.disabled = true;
         btnStop.disabled = false;
         meetingNameInput.disabled = true;
-        audioDeviceSelect.disabled = true;
+        micDeviceSelect.disabled = true;
+        loopbackDeviceSelect.disabled = true;
         isRecording = true;
         currentMeetingName = name;
         setStatus('recording');
@@ -219,7 +251,7 @@
             const res = await fetch('/api/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ meeting_name: name, device })
+                body: JSON.stringify({ meeting_name: name, mic_device: micDevice, loopback_device: loopbackDevice })
             });
             const data = await res.json();
             if (!data.success) {
@@ -252,7 +284,8 @@
                 btnStart.disabled = false;
                 meetingNameInput.disabled = false;
                 meetingNameInput.value = '';
-                audioDeviceSelect.disabled = false;
+                micDeviceSelect.disabled = false;
+                loopbackDeviceSelect.disabled = false;
 
                 // Show background transcription banner
                 isTranscribing = true;
@@ -309,7 +342,8 @@
         btnStop.disabled = true;
         meetingNameInput.disabled = false;
         meetingNameInput.value = '';
-        audioDeviceSelect.disabled = false;
+        micDeviceSelect.disabled = false;
+        loopbackDeviceSelect.disabled = false;
         liveInfo.style.display = 'none';
         transcribingBanner.style.display = 'none';
         stopTimer();
@@ -462,10 +496,11 @@
     // Boot
     // ---------------------------------------------------------------------------
     document.addEventListener('DOMContentLoaded', () => {
-        btnStart           = document.getElementById('btnStart');
-        btnStop            = document.getElementById('btnStop');
-        meetingNameInput   = document.getElementById('meetingName');
-        audioDeviceSelect  = document.getElementById('audioDevice');
+        btnStart              = document.getElementById('btnStart');
+        btnStop               = document.getElementById('btnStop');
+        meetingNameInput      = document.getElementById('meetingName');
+        micDeviceSelect       = document.getElementById('micDevice');
+        loopbackDeviceSelect  = document.getElementById('loopbackDevice');
         statusDot          = document.getElementById('statusDot');
         statusText         = document.getElementById('statusText');
         liveInfo           = document.getElementById('liveInfo');

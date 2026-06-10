@@ -4,7 +4,6 @@ import { Mic, Volume2, Square, Circle, Loader2 } from 'lucide-react'
 export default function Recorder({ status, devices, onStart, onStop }) {
   const [meetingName, setMeetingName] = useState('')
   const [micDevice, setMicDevice] = useState('')
-  const [loopbackDevice, setLoopbackDevice] = useState('')
   const [error, setError] = useState('')
   const [liveData, setLiveData] = useState(null)
   const [elapsed, setElapsed] = useState(0)
@@ -20,9 +19,7 @@ export default function Recorder({ status, devices, onStart, onStop }) {
   useEffect(() => {
     if (!devices.length) return
     const mics = devices.filter(d => !d.is_loopback)
-    const loopbacks = devices.filter(d => d.is_loopback)
     if (mics.length && !micDevice) setMicDevice(String(mics[0].index))
-    if (loopbacks.length && !loopbackDevice) setLoopbackDevice(String(loopbacks[0].index))
   }, [devices])
 
   useEffect(() => {
@@ -65,7 +62,6 @@ export default function Recorder({ status, devices, onStart, onStop }) {
       await onStart({
         meetingName: meetingName.trim(),
         micDevice: micDevice !== '' ? parseInt(micDevice) : null,
-        loopbackDevice: loopbackDevice !== '' ? parseInt(loopbackDevice) : null,
       })
     } catch (e) { setError(e.message) }
   }
@@ -77,7 +73,6 @@ export default function Recorder({ status, devices, onStart, onStop }) {
   }
 
   const mics = devices.filter(d => !d.is_loopback)
-  const loopbacks = devices.filter(d => d.is_loopback)
 
   const chevron = `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E")`
 
@@ -124,36 +119,44 @@ export default function Recorder({ status, devices, onStart, onStop }) {
 
         {/* Device selectors */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
-          {[
-            { label: 'Microphone', icon: <Mic size={11} />, value: micDevice, onChange: setMicDevice, options: mics, defaultOpt: null, hint: 'Your voice — headset or built-in mic' },
-            { label: 'System Audio', icon: <Volume2 size={11} />, value: loopbackDevice, onChange: setLoopbackDevice, options: loopbacks, defaultOpt: '— None (mic only) —', hint: 'Captures Zoom / Teams / Meet audio' },
-          ].map(({ label, icon, value, onChange, options, defaultOpt, hint }) => (
-            <div key={label}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px' }}>
-                {icon} {label}
-              </label>
-              <select
-                value={value}
-                onChange={e => onChange(e.target.value)}
-                disabled={isBusy}
-                style={{
-                  width: '100%', padding: '10px 36px 10px 14px', fontSize: '13px', color: '#374151',
-                  border: '1.5px solid #d1d5db', borderRadius: '10px', outline: 'none',
-                  background: isBusy ? `#f9fafb ${chevron} no-repeat right 12px center` : `#fff ${chevron} no-repeat right 12px center`,
-                  appearance: 'none', cursor: isBusy ? 'not-allowed' : 'pointer',
-                  fontFamily: 'Inter, system-ui, sans-serif', boxSizing: 'border-box',
-                  backgroundImage: chevron, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center',
-                }}
-              >
-                {defaultOpt && <option value="">{defaultOpt}</option>}
-                {options.length === 0
-                  ? <option value="">Loading…</option>
-                  : options.map(d => <option key={d.index} value={d.index}>{d.name}</option>)
-                }
-              </select>
-              <p style={{ fontSize: '11px', color: '#9ca3af', marginTop: '5px' }}>{hint}</p>
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px' }}>
+              <Mic size={11} /> Microphone
+            </label>
+            <select
+              value={micDevice}
+              onChange={e => setMicDevice(e.target.value)}
+              disabled={isBusy}
+              style={{
+                width: '100%', padding: '10px 36px 10px 14px', fontSize: '13px', color: '#374151',
+                border: '1.5px solid #d1d5db', borderRadius: '10px', outline: 'none',
+                background: isBusy ? `#f9fafb ${chevron} no-repeat right 12px center` : `#fff ${chevron} no-repeat right 12px center`,
+                appearance: 'none', cursor: isBusy ? 'not-allowed' : 'pointer',
+                fontFamily: 'Inter, system-ui, sans-serif', boxSizing: 'border-box',
+                backgroundImage: chevron, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center',
+              }}
+            >
+              {mics.length === 0
+                ? <option value="">Loading…</option>
+                : mics.map(d => <option key={d.index} value={d.index}>{d.name}</option>)
+              }
+            </select>
+            <p style={{ fontSize: '11px', color: '#9ca3af', marginTop: '5px' }}>Your voice — headset or built-in mic</p>
+          </div>
+          <div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px' }}>
+              <Volume2 size={11} /> System Audio
+            </label>
+            <div style={{
+              width: '100%', padding: '10px 14px', fontSize: '13px', color: '#6b7280',
+              border: '1.5px solid #e5e7eb', borderRadius: '10px',
+              background: '#f9fafb', boxSizing: 'border-box',
+              fontFamily: 'Inter, system-ui, sans-serif',
+            }}>
+              Auto (follows active output)
             </div>
-          ))}
+            <p style={{ fontSize: '11px', color: '#9ca3af', marginTop: '5px' }}>Captures Zoom / Teams / Meet audio</p>
+          </div>
         </div>
 
         {/* Error */}
