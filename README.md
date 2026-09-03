@@ -338,9 +338,36 @@ summarising silence.
 Because tab audio is a direct digital stream, the Bluetooth/HFP dropout problem
 that affects local loopback capture cannot occur in this mode.
 
-### Off your home network
+### Off your home network — Tailscale (recommended)
 
-The HTTPS listener covers the same Wi-Fi. To reach MeetScribe from anywhere,
-put [Tailscale](https://tailscale.com) on both machines and run
-`tailscale serve https / http://localhost:5001` — that gives a stable hostname
-with a real certificate (no browser warning) and needs no open router ports.
+Tailscale is set up on this PC as the tailnet node **`meetscribe`**, proxying
+port 5001 over HTTPS. Use this URL from anywhere — home, cafe, tethered:
+
+**https://meetscribe.tail1b4ded.ts.net**
+
+The certificate is a real Let's Encrypt one issued to the `.ts.net` name, so
+there is **no browser warning** and the secure-context requirement is satisfied
+outright — browser capture works with no clicking through.
+
+The other laptop needs Tailscale installed and signed in to the same account.
+Nothing is exposed to the public internet: the tailnet is private, no router
+ports are opened, and the URL only resolves for your own devices.
+
+The proxy was created with:
+
+```bash
+tailscale serve --bg --https=443 http://127.0.0.1:5001
+tailscale serve status          # show it
+tailscale serve --https=443 off # remove it
+```
+
+It persists across reboots. MeetScribe itself must still be running
+(`python app.py`) for the URL to answer.
+
+### Which URL to use
+
+| URL | Works | Certificate |
+|---|---|---|
+| `http://localhost:5001` | On this PC | n/a — unchanged |
+| `https://192.168.68.101:5443` | Same Wi-Fi only | Self-signed, one-time warning |
+| `https://meetscribe.tail1b4ded.ts.net` | Anywhere, via Tailscale | Real, no warning |
