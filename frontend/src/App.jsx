@@ -79,6 +79,16 @@ export default function App() {
     startStatusPoll()
   }
 
+  // Browser capture drives its own recording lifecycle (the audio never touches
+  // the server's sound devices), so it only needs to steer the shared UI state.
+  const handleBrowserStart = () => setStatus('recording')
+
+  const handleBrowserStop = () => {
+    setStatus('transcribing')
+    fetchRecordings()
+    startStatusPoll()
+  }
+
   const handleDelete = async (id) => {
     const res = await fetch('/api/delete', {
       method: 'POST',
@@ -108,6 +118,8 @@ export default function App() {
           devices={devices}
           onStart={handleStart}
           onStop={handleStop}
+          onBrowserStart={handleBrowserStart}
+          onBrowserStop={handleBrowserStop}
         />
         <RecordingsList
           recordings={recordings}

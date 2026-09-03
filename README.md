@@ -270,3 +270,77 @@ meetscribe/
 ---
 
 Built with ❤️ by CELESTIAL Coding Agent for Joseph.
+
+---
+
+## Remote Recording — use MeetScribe from another laptop
+
+MeetScribe normally records the mic and system audio of the machine it runs on.
+That is the wrong machine when the meeting is on a different laptop, so there
+are now two capture modes, selected with **Capture From** at the top of the
+recorder.
+
+| Mode | Use when | What gets captured |
+|---|---|---|
+| **This PC** (default) | The meeting is on the MeetScribe machine | Mic + WASAPI loopback of every output device — unchanged behaviour |
+| **This Browser** | The meeting is on the laptop you're sitting at | That laptop's mic + the audio of a shared browser tab |
+
+In **This Browser** mode the laptop only captures and uploads audio — Whisper
+and Ollama still run on the PC. Encoding uses the browser's built-in Opus
+encoder, so a slow laptop can handle it while running Google Meet.
+
+### Reaching MeetScribe from the other laptop
+
+Browsers only allow microphone and tab capture in a *secure context*, so remote
+capture will not work over plain `http://<lan-ip>:5001`. The server therefore
+opens a second, HTTPS listener on port **5443** alongside the usual HTTP one.
+
+```bash
+python make_cert.py   # once, and again if this PC's LAN IP changes
+python app.py
+```
+
+Then on the other laptop, on the same Wi-Fi:
+
+**https://&lt;this-PC-LAN-IP&gt;:5443**
+
+The certificate is self-signed, so Chrome shows a warning on the first visit —
+click **Advanced → Proceed**. Chrome then treats the origin as secure and audio
+capture works. `http://localhost:5001` on this PC is unaffected.
+
+Windows Firewall blocks inbound connections on networks marked *Public*. Allow
+the two ports once, from an elevated PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "MeetScribe HTTPS (LAN)" -Direction Inbound `
+  -Protocol TCP -LocalPort 5443 -Action Allow -Profile Any -RemoteAddress <your-subnet>/24
+```
+
+### Recording a Google Meet from the laptop
+
+1. Join the Meet call in a Chrome tab as usual
+2. Open MeetScribe's HTTPS URL in another tab
+3. Choose **This Browser**, enter a meeting name, press **Start Recording**
+4. In Chrome's picker: **Chrome Tab** → your **Google Meet** tab → turn on
+   **"Also share tab audio"** → Share
+5. The live panel shows two meters — *your mic* and *meeting audio*. Both should
+   read **live** once people are talking
+6. Press **Stop Recording**. Audio finalizes on the PC and transcription starts
+   there; the recording appears in the same list as every other meeting
+
+Tab audio does not include your own voice (Meet never plays it back), which is
+why the mic is captured separately and mixed on the server. The two are kept on
+separate channels until they arrive, so the same audio-health check used by the
+local recorder can tell "the meeting audio never arrived" apart from "nobody
+spoke", and still flag a bad recording as **⚠️ No audio** instead of
+summarising silence.
+
+Because tab audio is a direct digital stream, the Bluetooth/HFP dropout problem
+that affects local loopback capture cannot occur in this mode.
+
+### Off your home network
+
+The HTTPS listener covers the same Wi-Fi. To reach MeetScribe from anywhere,
+put [Tailscale](https://tailscale.com) on both machines and run
+`tailscale serve https / http://localhost:5001` — that gives a stable hostname
+with a real certificate (no browser warning) and needs no open router ports.

@@ -855,10 +855,61 @@ def api_live_status():
         "warning": warning,
     })
 
+
+# ---------------------------------------------------------------------------
+# Remote browser capture (Mode B) — see remote_capture.py
+#
+# Registered last so every helper it needs is already defined. Purely additive:
+# it adds /api/remote/* routes and touches nothing in the local record path.
+# ---------------------------------------------------------------------------
+try:
+    from remote_capture import register_remote_capture
+
+    register_remote_capture(
+        app,
+        recordings_dir=app.config['RECORDINGS_DIR'],
+        active_ratio=_active_ratio,
+        classify_system_audio=_classify_system_audio,
+        load_index=load_recordings_index,
+        save_index=save_recordings_index,
+        transcribe_audio=transcribe_audio,
+        state=state,
+    )
+except Exception as _e:
+    # A failure here must never stop the local recorder from starting.
+    print(f"[Remote] Browser-capture routes unavailable: {_e}")
+
+
+def _start_https_listener(port=5443):
+    """Serve the same app over HTTPS in a background thread.
+
+    Browsers only expose getUserMedia/getDisplayMedia in a secure context, so
+    remote capture from another laptop cannot work over plain http://<lan-ip>.
+    The existing HTTP listener on 5001 is left exactly as it was; this is an
+    additional door, not a replacement.
+    """
+    cert_dir = Path(__file__).parent / "certs"
+    cert, key = cert_dir / "cert.pem", cert_dir / "key.pem"
+    if not (cert.exists() and key.exists()):
+        print("[HTTPS] No certificate found — run `python make_cert.py` to enable remote capture.")
+        return
+    try:
+        import ssl
+        from werkzeug.serving import make_server
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(cert), str(key))
+        server = make_server('0.0.0.0', port, app, ssl_context=ctx, threaded=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"[HTTPS] Secure listener on https://0.0.0.0:{port} (for remote browser capture)")
+    except Exception as e:
+        print(f"[HTTPS] Could not start secure listener: {e}")
+
 if __name__ == '__main__':
     print("Starting MeetScribe (Windows)...")
     print(f"Recordings dir: {app.config['RECORDINGS_DIR']}")
     print(f"Transcripts dir: {app.config['TRANSCRIPTS_DIR']}")
     # Pre-load Whisper model in background so first transcription is fast
     threading.Thread(target=get_whisper_model, daemon=True).start()
+    _start_https_listener()
     app.run(host='0.0.0.0', port=5001, debug=False)
