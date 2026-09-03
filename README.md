@@ -217,7 +217,9 @@ If Ollama is not running, the transcript is still saved — only the summary is 
 | Per-meeting folder organization | ✅ |
 | Delete recording + all files | ✅ |
 | React UI (light theme) | ✅ |
-| Fully offline | ✅ |
+| Record from a browser on another machine | ✅ |
+| Reachable off your home network (Tailscale) | ✅ |
+| Fully offline (audio never leaves your devices) | ✅ |
 | Speaker diarization | ❌ (future) |
 
 ---
@@ -229,6 +231,9 @@ meetscribe/
 ├── app.py                  # Windows backend — the entry point that runs (faster-whisper)
 ├── app_windows.py          # in-sync copy of app.py
 ├── app_mac.py              # macOS backend (mlx-whisper)
+├── remote_capture.py       # /api/remote/* — audio captured by a browser elsewhere
+├── make_cert.py            # generates certs/ for the HTTPS listener on 5443
+├── certs/                  # self-signed cert + key (gitignored)
 ├── requirements_mac.txt
 ├── requirements_windows.txt
 ├── recordings_index.json   # per-meeting metadata
@@ -236,6 +241,7 @@ meetscribe/
 └── frontend/               # shared React + Vite app
     ├── src/
     │   ├── App.jsx
+    │   ├── browserCapture.js   # mic + tab capture, chunk upload (Mode B)
     │   └── components/
     │       ├── Topbar.jsx
     │       ├── Recorder.jsx
@@ -267,9 +273,29 @@ meetscribe/
 **Ollama summary not generating**
 → Run `ollama serve` in a terminal, or check it's running with `curl http://localhost:11434/api/tags`.
 
----
+**Remote: the URL won't load from the other laptop**
+→ MeetScribe must be running on the PC (`python app.py`). Tailscale starts
+itself at boot and the proxy config persists, but the server does not — if the
+PC rebooted, start it again. Also check the PC isn't asleep.
 
-Built with ❤️ by CELESTIAL Coding Agent for Joseph.
+**Remote: "This page must be opened over https://"**
+→ You're on `http://<lan-ip>:5001`. Browsers only allow mic and tab capture in a
+secure context. Use the Tailscale URL, or the HTTPS listener on port 5443.
+
+**Remote: first HTTPS request hangs or fails the TLS handshake**
+→ Only on a brand-new Tailscale hostname: the Let's Encrypt certificate is
+issued lazily on the first connection, and that first attempt can time out. Run
+`tailscale cert <host>.ts.net` once to force issuance, then retry. This is not a
+firewall problem.
+
+**Remote: "No tab audio was shared"**
+→ In Chrome's picker you must choose the **Chrome Tab** option and switch on
+**"Also share tab audio"**. Sharing a whole screen or window without that
+toggle gives video only, and there is nothing to record.
+
+**Remote: meeting-audio meter reads "silent" the whole call**
+→ You shared the wrong tab. Stop, start again, and pick the Google Meet tab
+itself — the meter should move as soon as someone speaks.
 
 ---
 
@@ -371,3 +397,7 @@ It persists across reboots. MeetScribe itself must still be running
 | `http://localhost:5001` | On this PC | n/a — unchanged |
 | `https://192.168.68.101:5443` | Same Wi-Fi only | Self-signed, one-time warning |
 | `https://meetscribe.tail1b4ded.ts.net` | Anywhere, via Tailscale | Real, no warning |
+
+---
+
+Built with ❤️ by CELESTIAL Coding Agent for Joseph.
