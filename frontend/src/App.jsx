@@ -67,6 +67,7 @@ export default function App() {
     const data = await res.json()
     if (!data.success) throw new Error(data.error)
     setStatus('recording')
+    return data
   }
 
   const handleStop = async () => {

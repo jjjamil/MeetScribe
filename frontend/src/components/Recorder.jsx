@@ -7,6 +7,7 @@ export default function Recorder({ status, devices, onStart, onStop }) {
   const [error, setError] = useState('')
   const [liveData, setLiveData] = useState(null)
   const [elapsed, setElapsed] = useState(0)
+  const [startWarning, setStartWarning] = useState(null)
 
   const liveRef = useRef(null)
   const timerRef = useRef(null)
@@ -40,6 +41,7 @@ export default function Recorder({ status, devices, onStart, onStop }) {
       clearInterval(liveRef.current)
       setLiveData(null)
       setElapsed(0)
+      setStartWarning(null)
       startTimeRef.current = null
     }
     return () => {
@@ -58,11 +60,13 @@ export default function Recorder({ status, devices, onStart, onStop }) {
   const handleStart = async () => {
     setError('')
     if (!meetingName.trim()) { setError('Please enter a meeting name.'); return }
+    setStartWarning(null)
     try {
-      await onStart({
+      const data = await onStart({
         meetingName: meetingName.trim(),
         micDevice: micDevice !== '' ? parseInt(micDevice) : null,
       })
+      setStartWarning(data?.warning || null)
     } catch (e) { setError(e.message) }
   }
 
@@ -163,6 +167,23 @@ export default function Recorder({ status, devices, onStart, onStop }) {
         {error && (
           <div style={{ padding: '10px 14px', background: '#fef2f2', border: '1px solid #fecaca', borderRadius: '8px', fontSize: '13px', color: '#dc2626', marginBottom: '16px' }}>
             {error}
+          </div>
+        )}
+
+        {/* Pre-flight warning shown the moment recording starts (e.g. Bluetooth output) */}
+        {isRecording && startWarning && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '12px 16px', background: '#fffbeb', border: '1.5px solid #f59e0b', borderRadius: '12px', marginBottom: '12px' }}>
+            <span style={{ fontSize: '16px', lineHeight: 1.3 }}>🎧</span>
+            <p style={{ fontSize: '13px', color: '#92400e', margin: 0, fontWeight: 500, flex: 1 }}>{startWarning}</p>
+            <button onClick={() => setStartWarning(null)} style={{ background: 'none', border: 'none', color: '#92400e', cursor: 'pointer', fontSize: '16px', lineHeight: 1, padding: 0 }}>×</button>
+          </div>
+        )}
+
+        {/* Audio-health warning (dead / silent / Bluetooth system audio) */}
+        {isRecording && liveData?.warning && (
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', padding: '12px 16px', background: '#fffbeb', border: '1.5px solid #f59e0b', borderRadius: '12px', marginBottom: '12px' }}>
+            <span style={{ fontSize: '16px', lineHeight: 1.3 }}>⚠️</span>
+            <p style={{ fontSize: '13px', color: '#92400e', margin: 0, fontWeight: 500 }}>{liveData.warning}</p>
           </div>
         )}
 

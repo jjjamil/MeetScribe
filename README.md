@@ -10,10 +10,10 @@ Records audio from your computer (mic + system audio from Zoom, Google Meet, Tea
 
 | | macOS | Windows |
 |---|---|---|
-| **Backend** | `app_mac.py` | `app_windows.py` |
+| **Backend** | `app_mac.py` | `app.py` (`app_windows.py` = in-sync copy) |
 | **Dependencies** | `requirements_mac.txt` | `requirements_windows.txt` |
 | **Transcription** | mlx-whisper (Apple Silicon) | faster-whisper (CPU, int8) |
-| **System audio capture** | BlackHole + Aggregate Device | WASAPI Stereo Mix (built-in) |
+| **System audio capture** | BlackHole + Aggregate Device | WASAPI loopback (`soundcard`) — auto-captures **all** output devices |
 | **AI Summary** | Ollama (local) | Ollama (local) |
 | **Frontend** | React + Vite (shared) | React + Vite (shared) |
 
@@ -117,17 +117,11 @@ Open: **http://localhost:5001**
 - Python 3.10–3.12
 - Node.js 18+
 - Ollama (for AI summaries)
-- No virtual audio cable needed — Windows has built-in Stereo Mix
+- No virtual audio cable and no Stereo Mix needed — capture is fully automatic
 
-### Step 1 — Enable Stereo Mix
+### Step 1 — System audio capture (automatic)
 
-Stereo Mix captures all system audio (meeting participants) as a virtual input. No extra software needed.
-
-1. Right-click the speaker icon in the taskbar → **Sound settings**
-2. Go to **Sound Control Panel** → **Recording** tab
-3. Right-click in the empty area → **Show Disabled Devices**
-4. Right-click **Stereo Mix** → **Enable**
-5. If Stereo Mix is missing, update your audio driver (Realtek HD Audio includes it by default)
+Nothing to set up. MeetScribe uses WASAPI loopback (via the `soundcard` library) to capture your computer's audio directly, and it records **every** output device at once — built-in speakers, wired headphones, USB wireless dongles, and Bluetooth. Whichever device your meeting audio plays through is captured automatically. No Stereo Mix, no virtual cable, no device selection.
 
 ### Step 2 — Install Python Dependencies
 
@@ -155,21 +149,23 @@ cd ..
 ### Step 5 — Run MeetScribe
 
 ```bash
-python app_windows.py
+python app.py
 ```
+
+> `app.py` is the Windows entry point that actually runs. `app_windows.py` is kept as an in-sync copy — any edit must land in both.
 
 Open: **http://localhost:5001**
 
-### Step 6 — Select Your Devices in the UI
+### Step 6 — Select Your Mic in the UI
 
 - **Mic Input** → select your microphone (or leave as default — "Microsoft Sound Mapper" uses the Windows default input)
-- **Loopback / System Audio** → select **Stereo Mix**
+- **System Audio** → nothing to pick. It reads **"Auto (follows active output)"** — MeetScribe captures every output device and mixes them with your mic automatically.
 
-Both streams are recorded in parallel and mixed before transcription.
+### Headsets & USB dongles (Bluetooth, wireless gaming, etc.) on Windows
 
-### Bluetooth headsets (AirPods, etc.) on Windows
+Because MeetScribe now captures **all** output devices, it no longer matters which one your meeting plays through — a USB wireless dongle, wired headphones, or the built-in speakers are all captured automatically. Set your headset as the default input in **Windows Settings → System → Sound → Input** and leave Mic as "Microsoft Sound Mapper" so MeetScribe uses it.
 
-Set your headset as the default input in **Windows Settings → System → Sound → Input**, then leave Mic as "Microsoft Sound Mapper" in MeetScribe — it will use your headset automatically.
+One physical limit remains: a **Bluetooth** headset in call (Hands-Free / HFP) mode can genuinely stop sending audio to any loopback endpoint. If that happens, MeetScribe detects the silence live and flags the recording (see the safeguard below). A wired or USB-dongle output avoids it entirely.
 
 ---
 
@@ -189,7 +185,9 @@ Set your headset as the default input in **Windows Settings → System → Sound
 The Aggregate Device in Audio MIDI Setup combines BlackHole (system audio from the meeting) and your microphone into a single stream. MeetScribe captures it in one go.
 
 ### Windows
-MeetScribe opens **two parallel audio streams** — one for your mic and one for Stereo Mix — then mixes them 50/50 in Python before saving the WAV file.
+MeetScribe opens one audio stream for your mic and a WASAPI **loopback stream for every output device** (via the `soundcard` library), all in parallel. At stop time it sums the loopback streams — idle devices contribute silence, the active one carries the meeting — then mixes that with the mic 50/50 before saving the WAV. This is why device selection is unnecessary: whichever output the meeting uses is already being recorded.
+
+**Live audio-health safeguard:** MeetScribe monitors the loopback level while recording. If no system audio is detected on any output (e.g. a Bluetooth headset dropped into HFP mode, or nothing is actually playing), it shows a live ⚠️ warning during the meeting, marks the recording **"⚠️ No audio,"** and skips the AI summary rather than generating a hallucinated one from silence.
 
 ---
 
@@ -212,6 +210,8 @@ If Ollama is not running, the transcript is still saved — only the summary is 
 |---------|-----------|
 | On-demand recording | ✅ |
 | Mic + system audio capture | ✅ |
+| Auto-capture of **all** output devices (Windows) | ✅ |
+| Live audio-loss detection + "⚠️ No audio" flag | ✅ |
 | Timestamped transcript | ✅ |
 | AI meeting summary (Ollama, local) | ✅ |
 | Per-meeting folder organization | ✅ |
@@ -226,8 +226,9 @@ If Ollama is not running, the transcript is still saved — only the summary is 
 
 ```
 meetscribe/
+├── app.py                  # Windows backend — the entry point that runs (faster-whisper)
+├── app_windows.py          # in-sync copy of app.py
 ├── app_mac.py              # macOS backend (mlx-whisper)
-├── app_windows.py          # Windows backend (faster-whisper)
 ├── requirements_mac.txt
 ├── requirements_windows.txt
 ├── recordings_index.json   # per-meeting metadata
@@ -249,10 +250,10 @@ meetscribe/
 ## Troubleshooting
 
 **Transcript is empty / no audio recorded**
-→ Make sure both devices are selected before clicking Start. On macOS, verify the Aggregate Device appears in the dropdown.
+→ On macOS, verify the Aggregate Device appears in the dropdown and is selected. On Windows, system audio is captured automatically — if a recording is flagged **"⚠️ No audio,"** it means no sound reached any output device (check the meeting was actually playing audio; if on a Bluetooth headset, try a wired or USB output).
 
-**Stereo Mix not in device list (Windows)**
-→ Enable it in Control Panel → Sound → Recording (right-click → Show Disabled Devices). If missing, update your Realtek audio driver.
+**Windows: other participants' voices missing, only your mic captured**
+→ This was the old default-speaker-only bug (fixed 2026-07): MeetScribe used to record only the Windows default output, so audio playing through a different device (e.g. a USB headset dongle) was missed. It now records **every** output device — make sure you're on the current `app.py` / `app_windows.py`.
 
 **BlackHole not showing in device list (macOS)**
 → Restart MeetScribe after installing BlackHole. Confirm it appears in System Settings → Sound first.

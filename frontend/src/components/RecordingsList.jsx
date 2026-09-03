@@ -82,7 +82,14 @@ export default function RecordingsList({ recordings, onView, onDelete }) {
                     <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#d1d5db', fontWeight: 600 }}>{idx + 1}</span>
                   </td>
                   <td style={{ padding: '13px 16px' }}>
-                    <span style={{ fontWeight: 600, color: '#111827' }}>{rec.name}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontWeight: 600, color: '#111827' }}>{rec.name}</span>
+                      {(rec.audio_lost || rec.system_audio === 'missing' || rec.system_audio === 'low') && (
+                        <span title="Meeting/system audio was not captured — transcript is unreliable. Likely Bluetooth output during a call." style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '2px 7px', background: '#fffbeb', color: '#b45309', border: '1px solid #fcd34d', borderRadius: '6px', fontSize: '10px', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          ⚠️ No audio
+                        </span>
+                      )}
+                    </span>
                   </td>
                   <td style={{ padding: '13px 16px' }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '5px', color: '#6b7280', fontSize: '12px' }}>

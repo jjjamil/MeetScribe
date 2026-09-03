@@ -10,6 +10,24 @@ Windows audio setup:
 No virtual audio cable needed for system audio — Windows exposes loopback
 devices natively through WASAPI (they show up as inputs named like
 "Speakers (Loopback)" or "Stereo Mix").
+
+KNOWN LIMITATION — Bluetooth output during calls:
+  Loopback attaches to the default speaker at record start. Bluetooth
+  headsets (AirPods etc.) expose TWO endpoints: a high-quality A2DP
+  "Headphones" endpoint used for media, and a mono "Hands-Free" (HFP)
+  endpoint used during calls. When a meeting needs your mic, Windows
+  switches the headset into HFP mode and routes the meeting audio to the
+  Hands-Free endpoint — but loopback is often still attached to the now-idle
+  A2DP endpoint, so it records near-silence. (Root cause of the mostly-empty
+  2026-07-01 "Meeting with the Hills" transcript.)
+  Reliable workaround: send meeting AUDIO to laptop speakers or wired
+  output while recording; the mic can be anything.
+
+SAFEGUARD:
+  The loopback worker tracks live RMS and flags Bluetooth output at start.
+  /api/live_status returns a `warning` when the system-audio capture is dead
+  (no stream), silent for 20s+, or attached to a Bluetooth endpoint, so a
+  failed capture is caught DURING the meeting instead of the next morning.
 """
 
 import os
@@ -66,13 +84,33 @@ class RecordingState:
         self.current_meeting_id = None
         self.current_meeting_dir = None
 
-        # Separate queues for mic and loopback streams
+        # Mic queue + one loopback capture per output endpoint. We record EVERY
+        # output device's loopback and mix them at stop time, so the meeting is
+        # captured no matter which speaker/headset/dongle Windows routes it to.
+        # (The old code guessed the single default speaker and missed the audio
+        # whenever it played out of a different device — e.g. a USB headset
+        # dongle while the default output was the built-in speakers.)
         self.mic_queue = []
-        self.loopback_queue = []
+        self.loopback_queue = []           # legacy/unused; kept so dead callbacks don't crash
+        self.loopback_devices = []         # list of {"id","name","is_bluetooth","rms","queue":[]}
         self.sample_rate = 16000
         self.recording_thread = None
 
+        # Live audio-health monitoring (so a dead/silent capture is caught
+        # while it's still recording, not the next morning).
+        self.loopback_rms = 0.0            # max recent RMS across all captured outputs, 0..1
+        self.loopback_silent_seconds = 0.0  # consecutive seconds ALL outputs below the speech floor
+        self.output_device_name = None      # human summary of the output device(s) being captured
+        self.output_is_bluetooth = False    # True only if every captured output is Bluetooth/HFP
+
 state = RecordingState()
+
+# Loopback below this RMS (0..1 float scale) is treated as silence/dead air.
+# Measured dead-air ≈ 0.0012, real speech ≈ 0.015–0.045, so 0.004 cleanly splits them.
+LOOPBACK_SILENCE_RMS = 0.004
+# Markers in an output device name that indicate a Bluetooth/hands-free endpoint,
+# whose WASAPI loopback goes silent once Windows switches it into call (HFP) mode.
+_BLUETOOTH_OUTPUT_MARKERS = ('bluetooth', 'hands-free', 'hands free', 'airpod', 'wireless')
 
 # ---------------------------------------------------------------------------
 # Audio device helpers
@@ -143,11 +181,16 @@ def start_recording_meeting(meeting_name: str, mic_device=None):
     state.current_meeting_dir = meeting_dir
     state.mic_queue = []
     state.loopback_queue = []
+    state.loopback_devices = []
     state.sample_rate = 16000
+    state.loopback_rms = 0.0
+    state.loopback_silent_seconds = 0.0
+    state.output_device_name = None
+    state.output_is_bluetooth = False
 
     def record_loop():
         sd_streams = []
-        loopback_thread = None
+        loopback_threads = []
         try:
             # Mic stream (sounddevice)
             if mic_device is not None:
@@ -178,28 +221,73 @@ def start_recording_meeting(meeting_name: str, mic_device=None):
                 fallback.start()
                 sd_streams.append(fallback)
 
-            # Loopback thread via soundcard — opens the active output device directly in loopback
-            # mode, which works for any device including Bluetooth/AirPods (no separate loopback
-            # input device needed, unlike pyaudiowpatch/Stereo Mix).
-            def loopback_worker():
+            # Loopback via soundcard — opens output devices directly in WASAPI
+            # loopback mode (works for any device incl. Bluetooth/USB dongles, no
+            # separate loopback input needed, unlike pyaudiowpatch/Stereo Mix).
+            #
+            # We capture EVERY output endpoint concurrently and mix them at stop
+            # time. This is the fix for the "audio played out of a different
+            # device than the default speaker" failure: instead of guessing which
+            # single device carries the meeting, we record them all — an idle
+            # endpoint just contributes silence, the live one carries the meeting.
+            try:
+                speakers = sc.all_speakers()
+            except Exception as e:
+                print(f"[Record] Could not enumerate speakers: {e}")
+                speakers = []
+            if not speakers:
                 try:
-                    spk = sc.default_speaker()
-                    lb_mic = sc.get_microphone(spk.id, include_loopback=True)
-                    print(f"[Record] Loopback started: {lb_mic.name}")
+                    speakers = [sc.default_speaker()]
+                except Exception as e:
+                    print(f"[Record] No output device available for loopback: {e}")
+                    speakers = []
+
+            # Register each endpoint up front so live_status/stop see them even if
+            # a worker is slow to produce its first chunk.
+            for spk in speakers:
+                is_bt = any(m in spk.name.lower() for m in _BLUETOOTH_OUTPUT_MARKERS)
+                state.loopback_devices.append(
+                    {"id": spk.id, "name": spk.name, "is_bluetooth": is_bt, "rms": 0.0, "queue": []}
+                )
+            state.output_device_name = ", ".join(d["name"] for d in state.loopback_devices) or None
+            state.output_is_bluetooth = bool(state.loopback_devices) and all(
+                d["is_bluetooth"] for d in state.loopback_devices
+            )
+            print(f"[Record] Capturing loopback from {len(state.loopback_devices)} output(s): "
+                  f"{state.output_device_name}")
+
+            def loopback_worker(dev):
+                try:
+                    lb_mic = sc.get_microphone(dev["id"], include_loopback=True)
                     chunk_size = int(state.sample_rate * 0.1)
                     with lb_mic.recorder(samplerate=state.sample_rate, channels=1, blocksize=chunk_size) as rec:
                         while state.is_recording:
                             data = rec.record(numframes=chunk_size)
                             if state.is_recording:
-                                state.loopback_queue.append(data.copy().astype(np.float32))
+                                chunk = data.copy().astype(np.float32)
+                                dev["queue"].append(chunk)
+                                dev["rms"] = float(np.sqrt(np.mean(chunk ** 2))) if chunk.size else 0.0
                 except Exception as e:
-                    print(f"[Record] Loopback failed: {e}")
+                    print(f"[Record] Loopback failed for '{dev['name']}': {e}")
 
-            loopback_thread = threading.Thread(target=loopback_worker, daemon=True)
-            loopback_thread.start()
+            loopback_threads = []
+            for dev in state.loopback_devices:
+                t = threading.Thread(target=loopback_worker, args=(dev,), daemon=True)
+                t.start()
+                loopback_threads.append(t)
 
+            # Central health tracker: live RMS = loudest endpoint; silence only
+            # counts when EVERY endpoint is below the speech floor.
+            tick = 0.2
             while state.is_recording:
-                sd.sleep(100)
+                sd.sleep(int(tick * 1000))
+                agg_rms = max((d["rms"] for d in state.loopback_devices), default=0.0)
+                state.loopback_rms = agg_rms
+                if state.loopback_devices:
+                    if agg_rms < LOOPBACK_SILENCE_RMS:
+                        state.loopback_silent_seconds += tick
+                    else:
+                        state.loopback_silent_seconds = 0.0
 
         except Exception as e:
             print(f"[Record] Unexpected error: {e}")
@@ -210,12 +298,43 @@ def start_recording_meeting(meeting_name: str, mic_device=None):
                     s.close()
                 except Exception:
                     pass
-            if loopback_thread:
-                loopback_thread.join(timeout=2)
+            for t in loopback_threads:
+                t.join(timeout=2)
 
     state.recording_thread = threading.Thread(target=record_loop, daemon=True)
     state.recording_thread.start()
     return True, f"Recording started: {meeting_name}"
+
+
+def _active_ratio(audio, sr, thr=LOOPBACK_SILENCE_RMS, win_s=0.5):
+    """Fraction of 0.5s windows whose RMS is above the speech floor.
+
+    Robust to sparse loud artifacts (a whole-file RMS would be inflated by a few
+    loud blips); this measures how much of the recording actually carried audio.
+    """
+    if audio is None or len(audio) == 0:
+        return 0.0
+    win = max(1, int(sr * win_s))
+    n = len(audio) // win
+    if n == 0:
+        return 1.0 if float(np.sqrt(np.mean(np.square(audio)))) >= thr else 0.0
+    trimmed = audio[:n * win].reshape(n, win)
+    rms = np.sqrt(np.mean(np.square(trimmed), axis=1))
+    return float(np.mean(rms >= thr))
+
+
+def _classify_system_audio(lb_audio, lb_ratio, mic_ratio):
+    """Decide whether the meeting/system audio was actually captured.
+
+    'missing' — loopback never produced samples, or was silent almost the whole
+                time (the Bluetooth-HFP failure). 'low' — mostly silent while the
+                mic clearly worked (system audio dropped but mic didn't). 'ok'.
+    """
+    if lb_audio is None or len(lb_audio) == 0 or lb_ratio < 0.02:
+        return "missing"
+    if lb_ratio < 0.15 and mic_ratio > (lb_ratio * 2 + 0.05):
+        return "low"
+    return "ok"
 
 
 def stop_recording_meeting():
@@ -228,9 +347,9 @@ def stop_recording_meeting():
         state.recording_thread.join(timeout=3)
 
     mic_chunks = state.mic_queue
-    lb_chunks = state.loopback_queue
+    have_lb = any(d["queue"] for d in state.loopback_devices)
 
-    if not mic_chunks and not lb_chunks:
+    if not mic_chunks and not have_lb:
         return None
 
     sr = state.sample_rate
@@ -243,8 +362,21 @@ def stop_recording_meeting():
             data = data.mean(axis=1)
         return data.astype(np.float32)
 
+    def merge_loopback(devices):
+        """Sum every captured output endpoint into one track. Idle endpoints are
+        silence and contribute nothing; the live one carries the meeting. Padded
+        to the longest so a device that started/stopped early still lines up."""
+        tracks = [t for t in (concat(d["queue"]) for d in devices) if t is not None and len(t)]
+        if not tracks:
+            return None
+        max_len = max(len(t) for t in tracks)
+        acc = np.zeros(max_len, dtype=np.float32)
+        for t in tracks:
+            acc[:len(t)] += t
+        return acc
+
     mic_audio = concat(mic_chunks)
-    lb_audio = concat(lb_chunks)
+    lb_audio = merge_loopback(state.loopback_devices)
 
     if mic_audio is not None and lb_audio is not None:
         # Pad shorter array to match longer one
@@ -258,11 +390,24 @@ def stop_recording_meeting():
         mixed = mic_audio
         print(f"[Stop] Mic only: {len(mixed)/sr:.1f}s")
     else:
-        mixed = lb_audio
+        mixed = np.clip(lb_audio, -1.0, 1.0)
         print(f"[Stop] Loopback only: {len(lb_audio)/sr:.1f}s")
 
     audio_path = state.current_meeting_dir / "recording.wav"
     sf.write(str(audio_path), mixed, sr)
+
+    # Assess whether the meeting/system audio was actually captured, so a dead
+    # loopback (e.g. Bluetooth output during a call) is flagged instead of
+    # silently producing a hallucinated transcript + summary.
+    try:
+        lb_ratio = _active_ratio(lb_audio, sr)
+        mic_ratio = _active_ratio(mic_audio, sr)
+        system_audio = _classify_system_audio(lb_audio, lb_ratio, mic_ratio)
+    except Exception as e:
+        print(f"[Stop] Audio-health check failed: {e}")
+        lb_ratio, mic_ratio, system_audio = None, None, "unknown"
+    print(f"[Stop] system_audio={system_audio} (loopback active {lb_ratio}, mic active {mic_ratio}, "
+          f"output='{state.output_device_name}', bluetooth={state.output_is_bluetooth})")
 
     meeting_info = {
         "id": state.current_meeting_id,
@@ -271,11 +416,15 @@ def stop_recording_meeting():
         "duration": round(len(mixed) / sr, 1),
         "audio_file": str(audio_path),
         "transcript_file": None,
-        "status": "recorded"
+        "status": "recorded",
+        "system_audio": system_audio,
+        "output_device": state.output_device_name,
+        "output_is_bluetooth": state.output_is_bluetooth,
     }
 
     state.mic_queue = []
     state.loopback_queue = []
+    state.loopback_devices = []
     return meeting_info
 
 # ---------------------------------------------------------------------------
@@ -384,13 +533,67 @@ def _do_transcribe(audio_path: str, meeting_id: str, meeting_name: str):
     meeting_dir = Path(audio_path).parent
     transcript_path = meeting_dir / "transcript.txt"
     full_transcript = "\n".join(transcript_lines)
-    transcript_path.write_text(full_transcript, encoding="utf-8")
-    print(f"[Transcribe] Transcript saved ({len(full_transcript)} chars)")
 
-    update_recording_index(meeting_id, transcript_path=str(transcript_path), status="transcribed")
+    # Pull the recording's captured health + duration to decide whether the
+    # transcript is trustworthy or the meeting audio was lost.
+    entry = next((e for e in load_recordings_index() if e.get("id") == meeting_id), {})
+    system_audio = entry.get("system_audio", "unknown")
+    duration_min = float(entry.get("duration", 0) or 0) / 60.0
+    density = len(full_transcript) / max(duration_min, 0.1)  # transcript chars per minute
+    # A multi-minute meeting that yielded almost no text means the audio was
+    # near-silent — Whisper then hallucinates fragments on silence.
+    sparse = duration_min >= 3 and density < 120
+    audio_lost = system_audio in ("missing", "low") or sparse
+
+    if audio_lost:
+        out = state.output_device_name or entry.get("output_device")
+        bt = state.output_is_bluetooth or entry.get("output_is_bluetooth")
+        reason = "on Bluetooth output, which usually isn't captured during a call" if bt \
+            else "— the meeting/system audio wasn't captured"
+        banner = (
+            "⚠️ SYSTEM AUDIO NOT CAPTURED — this transcript is unreliable.\n"
+            f"Little or no meeting audio was recorded {reason}"
+            + (f" (output: {out})" if out else "") + ".\n"
+            "The lines below are sparse and may be Whisper hallucinating on silence.\n"
+            "Fix for next time: set your meeting AUDIO output to laptop speakers or wired headphones\n"
+            "(your microphone can stay on Bluetooth).\n"
+            + ("=" * 70) + "\n\n"
+        )
+        full_transcript = banner + full_transcript
+
+    transcript_path.write_text(full_transcript, encoding="utf-8")
+    print(f"[Transcribe] Transcript saved ({len(full_transcript)} chars, system_audio={system_audio}, "
+          f"density={density:.0f}/min, audio_lost={audio_lost})")
+
+    update_recording_index(
+        meeting_id, transcript_path=str(transcript_path),
+        status="transcribed", audio_lost=audio_lost,
+    )
     print(f"[Transcribe] Updated index for {meeting_id}")
 
     summary_path = meeting_dir / "summary.txt"
+    header = (
+        f"Meeting: {meeting_name}\n"
+        f"Language: {detected_language}\n\n"
+    )
+
+    if audio_lost:
+        # Don't ask the LLM to summarize silence — it just invents a meeting.
+        out = state.output_device_name or entry.get("output_device")
+        print(f"[Summary] Skipping AI summary for {meeting_id}: system audio not captured.")
+        summary_content = header + (
+            "=== ⚠️ No usable audio ===\n"
+            "The meeting/system audio was not captured, so no summary was generated.\n"
+            f"Output device at record time: {out or 'unknown'}.\n\n"
+            "This is almost always caused by Bluetooth headphones: during a call Windows\n"
+            "switches them into hands-free mode and the meeting audio stops being captured.\n"
+            "To record reliably, send meeting audio to laptop speakers or wired headphones\n"
+            "(your microphone can stay on Bluetooth)."
+        )
+        summary_path.write_text(summary_content, encoding="utf-8")
+        print(f"[Transcribe] Done for {meeting_id} (flagged: audio not captured)")
+        return
+
     print(f"[Summary] Requesting Claude summary for {meeting_id}...")
     ai_summary = _generate_summary_claude(full_transcript, meeting_name)
     if ai_summary:
@@ -401,10 +604,6 @@ def _do_transcribe(audio_path: str, meeting_id: str, meeting_name: str):
         if ai_summary:
             print(f"[Summary] Ollama summary generated ({len(ai_summary)} chars)")
 
-    header = (
-        f"Meeting: {meeting_name}\n"
-        f"Language: {detected_language}\n\n"
-    )
     if ai_summary:
         summary_content = header + f"=== AI Summary ===\n{ai_summary}"
     else:
@@ -500,8 +699,32 @@ def api_start():
 
     mic_device = parse_device(data.get('mic_device'))
 
+    # Pre-flight: we capture every output endpoint, so device choice no longer
+    # matters — but if EVERY available output is Bluetooth, warn, since Bluetooth
+    # audio can still drop out mid-call regardless of which one we record.
+    output_device, output_is_bluetooth, preflight_warning = None, False, None
+    try:
+        speakers = sc.all_speakers()
+        output_device = ", ".join(s.name for s in speakers) or None
+        output_is_bluetooth = bool(speakers) and all(
+            any(m in s.name.lower() for m in _BLUETOOTH_OUTPUT_MARKERS) for s in speakers
+        )
+        if output_is_bluetooth:
+            preflight_warning = (
+                f"Your only audio output(s) — {output_device} — look like Bluetooth. Bluetooth "
+                "audio can drop out during a call; a wired or USB output is more reliable for recording."
+            )
+    except Exception as e:
+        print(f"[Start] Output pre-flight check failed: {e}")
+
     success, msg = start_recording_meeting(meeting_name, mic_device=mic_device)
-    return jsonify({"success": success, "message": msg})
+    return jsonify({
+        "success": success,
+        "message": msg,
+        "output_device": output_device,
+        "output_is_bluetooth": output_is_bluetooth,
+        "warning": preflight_warning,
+    })
 
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
@@ -599,15 +822,37 @@ def api_live_status():
     if not state.is_recording:
         return jsonify({"is_recording": False, "duration": 0.0, "chunks": 0})
     mic_samples = sum(c.shape[0] for c in state.mic_queue) if state.mic_queue else 0
-    lb_samples  = sum(c.shape[0] for c in state.loopback_queue) if state.loopback_queue else 0
+    lb_chunks_total = sum(len(d["queue"]) for d in state.loopback_devices)
+    lb_samples = sum(c.shape[0] for d in state.loopback_devices for c in d["queue"])
     total_samples = max(mic_samples, lb_samples)
     duration = round(total_samples / state.sample_rate, 1)
+
+    # Flag a dead/silent system-audio capture in real time. Priority: no stream at
+    # all → sustained silence → Bluetooth heads-up. Give the loopback a few seconds
+    # to spin up before complaining about silence. Because we now capture every
+    # output endpoint, "silent" means the meeting audio isn't reaching ANY of them.
+    warning = None
+    if duration >= 20 and lb_samples == 0:
+        warning = ("No system-audio stream — loopback capture failed to start. "
+                   "The meeting audio is NOT being recorded.")
+    elif state.loopback_silent_seconds >= 20:
+        warning = (f"No system audio detected on any output for {int(state.loopback_silent_seconds)}s. "
+                   "The meeting audio may not be captured — check that the call's audio is actually "
+                   "playing, and unmute the other participants if needed.")
+    elif state.output_is_bluetooth:
+        warning = (f"All outputs ({state.output_device_name}) look like Bluetooth. "
+                   "Bluetooth audio can drop out during a call — a wired/USB output is more reliable.")
+
     return jsonify({
         "is_recording": True,
         "duration": duration,
-        "chunks": len(state.mic_queue) + len(state.loopback_queue),
+        "chunks": len(state.mic_queue) + lb_chunks_total,
         "mic_chunks": len(state.mic_queue),
-        "loopback_chunks": len(state.loopback_queue),
+        "loopback_chunks": lb_chunks_total,
+        "loopback_rms": round(state.loopback_rms, 4),
+        "loopback_silent_seconds": round(state.loopback_silent_seconds, 1),
+        "output_device": state.output_device_name,
+        "warning": warning,
     })
 
 if __name__ == '__main__':
